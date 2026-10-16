@@ -1,0 +1,2 @@
+py-clob-client-v2>=0.0.1
+eth-account>=0.13.0
