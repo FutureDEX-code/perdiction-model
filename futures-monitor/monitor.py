@@ -25,7 +25,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from train import direction, domestic_tape, load_models, news_before, news_scores, views_from_features
+from train import (
+    direction,
+    domestic_tape,
+    load_models,
+    news_before,
+    news_ema_as_of,
+    news_scores,
+    views_from_features,
+)
 
 TZ = ZoneInfo("Asia/Shanghai")
 SINA = "https://hq.sinajs.cn/list="
@@ -183,6 +191,7 @@ def fetch_snapshot() -> Snapshot:
         ("nf_B2701", parse_domestic),
         ("nf_M2701", parse_domestic),
         ("nf_RM2701", parse_domestic),
+        ("nf_Y2701", parse_domestic),
     ]
     hf_map = [("hf_S", parse_hf), ("hf_SM", parse_hf), ("hf_BO", parse_hf)]
     codes = [c for c, _ in cn_map + hf_map]
@@ -349,6 +358,7 @@ def model_night(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias
     names = (
         ("豆一昨涨跌", domestic, "豆一"),
         ("豆二昨涨跌", domestic, "豆二"),
+        ("豆油昨涨跌", domestic, "豆油"),
         ("豆粕昨涨跌", domestic, "豆粕"),
         ("菜粕昨涨跌", domestic, "菜粕"),
         ("美豆隔夜", overseas, "大豆"),
@@ -358,7 +368,7 @@ def model_night(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias
     named: dict[str, float] = {}
     for label, pool, keyword in names:
         quote = q_by_name(pool, keyword)
-        if label == "豆二昨涨跌" and (quote is None or quote.pct is None):
+        if label in ("豆二昨涨跌", "豆油昨涨跌") and (quote is None or quote.pct is None):
             continue
         if quote is None or quote.pct is None:
             return None, "今晚：报价不齐，没有方向"
@@ -373,7 +383,21 @@ def model_night(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias
         b_rows = json.loads(b_path.read_text())
         b_series = {"B": {day: close for day, close in b_rows if close}}
         named["豆二这段"] = domestic_tape(b_series, keys=("B",))[0]
+    y_path = root / "Y.json"
+    if y_path.exists():
+        y_rows = json.loads(y_path.read_text())
+        y_series = {"Y": {day: close for day, close in y_rows if close}}
+        named["豆油这段"] = domestic_tape(y_series, keys=("Y",))[0]
     named["新闻倾向"] = news_before(news_scores(), today.isoformat(), (today + timedelta(days=1)).isoformat())
+    root = Path(__file__).resolve().parent / "data"
+    closes = {}
+    for key in ("A", "M", "RM", "S", "SM", "BO"):
+        path = root / f"{key}.json"
+        if path.exists():
+            closes[key] = {day: close for day, close in json.loads(path.read_text()) if close}
+    if {"A", "M", "RM"} <= set(closes):
+        named["新闻三日"] = news_ema_as_of(closes, news_scores(), today.isoformat())
+    named["菜粕价差波段"] = tape[2] - tape[1]
     try:
         models = load_models()
     except (OSError, json.JSONDecodeError, KeyError):
@@ -552,7 +576,7 @@ HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>豆一 / 豆二 / 豆粕 / 菜粕 2701 监控</h1>
+  <h1>豆一 / 豆二 / 豆粕 / 菜粕 / 豆油 2701 监控</h1>
   <div class="meta" id="meta">加载中…</div>
 </header>
 <div class="headline" id="headline"></div>

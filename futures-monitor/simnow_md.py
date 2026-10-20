@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record SimNow depth snapshots for 豆一 / 豆二 / 豆粕 / 菜粕.
+"""Record SimNow depth snapshots for 豆一 / 豆二 / 豆粕 / 菜粕 / 豆油.
 
 Market data only. This process never sends an order.
 Credentials live in data/simnow.json, which is not committed.
@@ -25,9 +25,15 @@ CFG = DATA / "simnow.json"
 FLOW = DATA / "ctp_flow"
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 豆一、豆二、豆粕在大连，代码小写。菜粕在郑州，CTP 用一位年份：RM701 即 2701。
-INSTRUMENTS = ("a2701", "b2701", "m2701", "RM701")
-NAMES = {"a2701": "豆一2701", "b2701": "豆二2701", "m2701": "豆粕2701", "rm701": "菜粕2701"}
+# 豆一、豆二、豆粕、豆油在大连，代码小写。菜粕在郑州，CTP 用一位年份：RM701 即 2701。
+INSTRUMENTS = ("a2701", "b2701", "m2701", "y2701", "RM701")
+NAMES = {
+    "a2701": "豆一2701",
+    "b2701": "豆二2701",
+    "m2701": "豆粕2701",
+    "y2701": "豆油2701",
+    "rm701": "菜粕2701",
+}
 
 
 def now_cn() -> str:

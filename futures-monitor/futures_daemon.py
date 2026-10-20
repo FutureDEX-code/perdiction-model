@@ -119,12 +119,13 @@ def _market_open(now: datetime) -> bool:
 
 
 def tape_mail_if_due() -> None:
-    """One Gmail tape note per clock hour while the market is open. Never the company mailbox."""
+    """One Gmail tape note per half hour while the market is open. Never the company mailbox."""
 
     now = datetime.now(TZ)
     if not _market_open(now):
         return
-    key = now.strftime("%Y-%m-%d %H")
+    minute = 0 if now.minute < 30 else 30
+    key = f"{now:%Y-%m-%d %H}:{minute:02d}"
     mark = ROOT / "data" / "tape_emailed_hour.txt"
     if mark.exists() and mark.read_text().strip() == key:
         return

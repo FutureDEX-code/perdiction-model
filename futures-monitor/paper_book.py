@@ -17,7 +17,7 @@ DATA = ROOT / "data"
 LEDGER = DATA / "paper_trades.json"
 LOTS = 10
 TONS = 10
-NAMES = {"A": "豆一", "B": "豆二", "M": "豆粕", "RM": "菜粕"}
+NAMES = {"A": "豆一", "B": "豆二", "M": "豆粕", "RM": "菜粕", "Y": "豆油"}
 
 
 def _load() -> list[dict]:
@@ -58,6 +58,7 @@ def simulate_month(month: str) -> list[dict]:
         weight, bias = train.fit(
             [train.apply_scale(row["x"], mean, scale) for row in train_rows],
             [row["y"][key] for row in train_rows],
+            [train.sample_weight(row["move"][key]) for row in train_rows],
         )
         models[key] = (mean, scale, weight, bias)
     booked = []
@@ -147,7 +148,7 @@ def _summary(booked: list[dict]) -> str:
     lines = []
     total = 0.0
     wins = 0
-    for key in ("A", "M", "RM"):
+    for key in ("A", "B", "M", "RM", "Y"):
         xs = [row for row in booked if row["code"] == key]
         pnl = sum(row["pnl"] for row in xs)
         won = sum(1 for row in xs if row["pnl"] > 0)

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 TAPE = DATA / "ctp_tape.jsonl"
 OUT = DATA / "session_tape.jsonl"
-NAMES = ("豆一2701", "豆二2701", "豆粕2701", "菜粕2701")
+NAMES = ("豆一2701", "豆二2701", "豆粕2701", "菜粕2701", "豆油2701")
 
 
 def _day_before(day: str) -> str:

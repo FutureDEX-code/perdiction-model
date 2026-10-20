@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-hour forecast from the hour that just traded.
+"""Half-hour forecast from the half hour that just traded.
 
 This layer is separate from the 14:50 next-session model in train.py.
 It is refit from the tape each time. Weights are not written into data/models.
@@ -14,10 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 TAPE = ROOT / "data" / "ctp_tape.jsonl"
-NAMES = ("豆一2701", "豆二2701", "豆粕2701", "菜粕2701")
+NAMES = ("豆一2701", "豆二2701", "豆粕2701", "菜粕2701", "豆油2701")
 SESSIONS = ((9 * 60, 10 * 60 + 15), (10 * 60 + 30, 11 * 60 + 30), (13 * 60 + 30, 15 * 60), (21 * 60, 23 * 60))
-# Five finished hours are enough to start. The fit stays shrunk while the tape is short.
+# Five finished half hours are enough to start. The fit stays shrunk while the tape is short.
 MIN_SAMPLES = 5
+SLOT = 30
+MIN_TICKS = 15
 
 
 def _minutes(at: str) -> int:
@@ -40,7 +42,7 @@ def _solve(matrix: list[list[float]], rhs: list[float]) -> list[float]:
         table[col], table[pivot] = table[pivot], table[col]
         scale = table[col][col]
         if abs(scale) < 1e-12:
-            raise ValueError("hour model is singular")
+            raise ValueError("half-hour model is singular")
         for col2 in range(col, size + 1):
             table[col][col2] /= scale
         for row in range(size):
@@ -67,29 +69,53 @@ def _add(bar: dict, price: float) -> None:
 
 
 def _features(bar: dict) -> dict[str, float] | None:
-    if bar["n"] < 30:
+    if bar["n"] < MIN_TICKS:
         return None
     span = bar["h"] - bar["l"]
     loc = 0.5 if span <= 0 else (bar["c"] - bar["l"]) / span
     return {"ret": bar["c"] - bar["o"], "rng": span, "loc": loc}
 
 
+def _clock(day: str, minutes: int) -> str:
+    return f"{day} {minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _full_slot(day: str, start_min: int) -> str | None:
+    """A half-hour bucket that sits entirely inside one session. The 10:15 stub is not one."""
+
+    end_min = start_min + SLOT
+    probe = f"{_clock(day, start_min)}:30"
+    session = _session(probe)
+    if session is None:
+        return None
+    sess_start, sess_end = session
+    if start_min < sess_start or end_min > sess_end:
+        return None
+    return _clock(day, start_min)
+
+
+def _completed_slot(now: datetime) -> tuple[str, str] | None:
+    """The half hour that just closed, if that whole half hour was in one session."""
+
+    local = now.replace(tzinfo=None)
+    end_min = (local.hour * 60 + local.minute) // SLOT * SLOT
+    start_min = end_min - SLOT
+    if start_min < 0:
+        return None
+    day = local.strftime("%Y-%m-%d")
+    slot = _full_slot(day, start_min)
+    if slot is None:
+        return None
+    return slot, _clock(day, end_min)
+
+
 def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None]]:
-    """Finished hour pairs, and the tape of the last hour inside the current session."""
+    """Finished half-hour pairs, and the half hour that just closed inside this session."""
 
     stamps: dict[tuple[str, str], dict] = {}
     live = {name: _bar() for name in NAMES}
-    live_ok = {name: False for name in NAMES}
     cutoff = now.strftime("%Y-%m-%d %H:%M:%S")
-    session = _session(cutoff)
-    window_start = ""
-    if session is not None:
-        start_min, _end_min = session
-        day = cutoff[:10]
-        open_at = datetime.strptime(f"{day} {start_min // 60:02d}:{start_min % 60:02d}", "%Y-%m-%d %H:%M")
-        begin = max(now.replace(tzinfo=None) - timedelta(hours=1), open_at)
-        window_start = begin.strftime("%Y-%m-%d %H:%M:%S")
-        live_ok = {name: (now.replace(tzinfo=None) - begin) >= timedelta(minutes=45) for name in NAMES}
+    done = _completed_slot(now)
     if not TAPE.exists():
         return {name: [] for name in NAMES}, {name: None for name in NAMES}
     with TAPE.open() as handle:
@@ -105,13 +131,18 @@ def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None]]
                 continue
             if price <= 0:
                 continue
-            key = (at[:13], name)
+            start_min = (_minutes(at) // SLOT) * SLOT
+            slot = _full_slot(at[:10], start_min)
+            # An open half hour is not a sample and not the bar we forecast from.
+            if slot is None or _clock(at[:10], start_min + SLOT) > cutoff[:16]:
+                continue
+            key = (slot, name)
             bar = stamps.get(key)
             if bar is None:
                 bar = _bar()
                 stamps[key] = bar
             _add(bar, price)
-            if live_ok[name] and at >= window_start:
+            if done is not None and slot == done[0]:
                 _add(live[name], price)
     samples: dict[str, list[dict]] = {name: [] for name in NAMES}
     by_name: dict[str, list[tuple[str, dict]]] = {name: [] for name in NAMES}
@@ -122,14 +153,13 @@ def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None]]
     for name in NAMES:
         rows = sorted(by_name[name])
         for (left, prev), (right, nxt) in zip(rows, rows[1:]):
-            start = datetime.strptime(left, "%Y-%m-%d %H")
-            end = datetime.strptime(right, "%Y-%m-%d %H")
-            gap = (end - start).total_seconds() / 60
-            if 45 <= gap <= 100:
+            start = datetime.strptime(left, "%Y-%m-%d %H:%M")
+            end = datetime.strptime(right, "%Y-%m-%d %H:%M")
+            if end - start == timedelta(minutes=SLOT):
                 samples[name].append({**prev, "y": nxt["close"] - prev["close"]})
     live_feat = {}
     for name in NAMES:
-        live_feat[name] = _features(live[name]) if live_ok[name] else None
+        live_feat[name] = _features(live[name]) if done is not None else None
     return samples, live_feat
 
 
@@ -155,7 +185,7 @@ def _fit(samples: list[dict], live: dict) -> dict | None:
             xty[i] += z[i] * sample["y"]
             for j in range(size):
                 xtx[i][j] += z[i] * z[j]
-    # Light shrink. The intercept is the baseline; the other three are this hour's tape.
+    # Light shrink. The intercept is the baseline; the other three are this half hour's tape.
     for i in range(1, size):
         xtx[i][i] += 1.0
     beta = _solve(xtx, xty)
