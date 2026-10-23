@@ -7,12 +7,16 @@ Enter at the prior close, leave at the next 15:00 close.
 
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 
-import train
+from core import train
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 LEDGER = DATA / "paper_trades.json"
 LOTS = 10
@@ -39,7 +43,7 @@ def simulate_month(month: str) -> list[dict]:
     """One calendar month. The model is fit only on days before that month."""
 
     series = {
-        key: {day: float(close) for day, close in json.loads((DATA / f"{key}.json").read_text())}
+        key: {day: close for day, close in train._cached_rows(train.series_path(key))}
         for key in ("A", "M", "RM", "S", "SM", "BO")
     }
     rows = [row for row in train.samples(series, train.news_scores()) if row["day"] >= "2017-01-01"]

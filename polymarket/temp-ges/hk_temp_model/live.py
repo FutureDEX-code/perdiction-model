@@ -15,6 +15,8 @@ from hk_temp_model.market import _BRIDGE, _token, outcome_tokens
 from hk_temp_model.paper import _load, record_exit, record_fill
 
 _USD = 5.0
+# Live orders stay off until the model is ready. The watcher records paper tickets only.
+LIVE_ORDERS = False
 
 
 def _size(price: float) -> float:
@@ -25,6 +27,8 @@ def _size(price: float) -> float:
 
 
 def _post_buy(city: str, token_id: str, price: float) -> None:
+    if not LIVE_ORDERS:
+        raise RuntimeError("实盘已停")
     body = json.dumps(
         {
             "token_id": token_id,
@@ -65,6 +69,8 @@ def _sell_price(side: str, item: dict) -> float | None:
 
 
 def _post_sell(city: str, token_id: str, price: float, size: float) -> None:
+    if not LIVE_ORDERS:
+        raise RuntimeError("实盘已停")
     body = json.dumps(
         {
             "token_id": token_id,

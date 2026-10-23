@@ -9,10 +9,16 @@ the opposite turn. The daily bar is the 15:00 close.
 
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+from core import train
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 NAMES = {"A": "豆一", "M": "豆粕", "RM": "菜粕"}
 REV = 0.03
@@ -98,7 +104,7 @@ def _median(values: list[float]) -> float:
 
 
 def report(key: str) -> None:
-    rows = json.loads((DATA / f"{key}.json").read_text())
+    rows = [[day, close] for day, close in train._cached_rows(train.series_path(key))]
     rows = [row for row in rows if row[0] >= "2017-01-01"]
     days = [row[0] for row in rows]
     closes = [row[1] for row in rows]

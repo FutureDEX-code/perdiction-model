@@ -8,12 +8,16 @@ not used as a training feature.
 
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 
-import train
+from core import train
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 BARS = DATA / "bars"
 CURVE = DATA / "contracts"
@@ -42,16 +46,6 @@ def main() -> None:
     BARS.mkdir(parents=True, exist_ok=True)
     CURVE.mkdir(parents=True, exist_ok=True)
     MINUTE.mkdir(parents=True, exist_ok=True)
-    for key, symbol in (("A", "A0"), ("B", "B0"), ("M", "M0"), ("RM", "RM0"), ("Y", "Y0")):
-        bars = _daily_bars(symbol)
-        if not bars:
-            print(f"{symbol} 日线空", flush=True)
-            continue
-        _save_bars(BARS / f"{key}.json", bars)
-        if key == "Y":
-            closes = [[row["d"], float(row["c"])] for row in bars]
-            (DATA / "Y.json").write_text(json.dumps(closes))
-        print(f"{symbol} 日线 {bars[0]['d']} → {bars[-1]['d']}  {len(bars)}", flush=True)
     months = ("01", "05", "09")
     for prefix in ("M", "Y", "A", "B", "RM"):
         kept = 0

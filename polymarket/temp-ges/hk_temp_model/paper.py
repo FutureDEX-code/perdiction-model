@@ -1,4 +1,4 @@
-"""Paper ledger. Five dollars when the model trades. Live orders are sent separately."""
+"""Paper ledger. Five dollars when the model trades. No exchange orders."""
 
 from __future__ import annotations
 

@@ -15,7 +15,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 OUTLOOK = ROOT / "data" / "outlook.json"
 SENT = ROOT / "data" / "futures_outlook_emailed.txt"
 # Gmail to the same Gmail. The company mailbox is never a sender or a recipient.

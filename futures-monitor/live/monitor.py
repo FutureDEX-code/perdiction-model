@@ -25,13 +25,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from train import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.train import (
     direction,
     domestic_tape,
     load_models,
     news_before,
     news_ema_as_of,
+    _cached_rows,
     news_scores,
+    series_path,
     views_from_features,
 )
 
@@ -341,14 +347,12 @@ def build_bias(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias]
 
 
 def _domestic_tape() -> list[float]:
-    root = Path(__file__).resolve().parent / "data"
     series: dict[str, dict[str, float]] = {}
     for key in ("A", "M", "RM", "B"):
-        path = root / f"{key}.json"
+        path = series_path(key)
         if not path.exists():
             continue
-        rows = json.loads(path.read_text())
-        series[key] = {day: close for day, close in rows if close}
+        series[key] = {day: close for day, close in _cached_rows(path) if close}
     return domestic_tape(series)
 
 
@@ -377,24 +381,19 @@ def model_night(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias
     tape = _domestic_tape()
     for label, value in zip(("豆一这段", "豆粕这段", "菜粕这段"), tape):
         named[label] = value
-    root = Path(__file__).resolve().parent / "data"
-    b_path = root / "B.json"
+    b_path = series_path("B")
     if b_path.exists():
-        b_rows = json.loads(b_path.read_text())
-        b_series = {"B": {day: close for day, close in b_rows if close}}
+        b_series = {"B": {day: close for day, close in _cached_rows(b_path) if close}}
         named["豆二这段"] = domestic_tape(b_series, keys=("B",))[0]
-    y_path = root / "Y.json"
+    y_path = series_path("Y")
     if y_path.exists():
-        y_rows = json.loads(y_path.read_text())
-        y_series = {"Y": {day: close for day, close in y_rows if close}}
+        y_series = {"Y": {day: close for day, close in _cached_rows(y_path) if close}}
         named["豆油这段"] = domestic_tape(y_series, keys=("Y",))[0]
-    named["新闻倾向"] = news_before(news_scores(), today.isoformat(), (today + timedelta(days=1)).isoformat())
-    root = Path(__file__).resolve().parent / "data"
     closes = {}
     for key in ("A", "M", "RM", "S", "SM", "BO"):
-        path = root / f"{key}.json"
+        path = series_path(key)
         if path.exists():
-            closes[key] = {day: close for day, close in json.loads(path.read_text()) if close}
+            closes[key] = {day: close for day, close in _cached_rows(path) if close}
     if {"A", "M", "RM"} <= set(closes):
         named["新闻三日"] = news_ema_as_of(closes, news_scores(), today.isoformat())
     named["菜粕价差波段"] = tape[2] - tape[1]
@@ -497,7 +496,7 @@ def render_terminal(s: Snapshot) -> str:
 
 
 def _outlook_lines() -> list[str]:
-    path = Path(__file__).resolve().parent / "data" / "outlook.json"
+    path = Path(__file__).resolve().parents[1] / "data" / "outlook.json"
     if not path.exists():
         return []
     try:

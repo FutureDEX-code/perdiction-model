@@ -8,9 +8,7 @@ from hk_temp_model.strategies import allow_yes
 
 _EDGE = 0.04
 _OVERSHOOT = 1.5
-_MIN_YES_ASK = 0.20
-_CHEAP_YES_ASK = 0.25
-_CHEAP_YES_LEAD = 1.0
+_MIN_YES_ASK = 0.35
 _MIN_YES_P = 0.40
 _FORECAST_NO_LEAD = 4.0
 
@@ -66,11 +64,10 @@ def no_board(
     """One row per market bracket.
 
     Shared Yes gates: the most likely bracket, at least 40 percent, ask from
-    0.20 up to but not including 0.97, and at least 4 cents cheaper than the
-    model. Asks under 0.20 lost every settled ticket of that kind. An ask
-    under 0.25 more than an hour before the peak is not bought; the same
-    price inside the last hour, or after the peak, still is. City files may
-    refuse that bracket before these gates run.
+    0.35 up to but not including 0.97, and at least 4 cents cheaper than the
+    model. Asks under 0.35 lost money both before and after live orders:
+    50 settled tickets, 10 wins, about -32 dollars. The last hour does not
+    waive that floor. City files may refuse that bracket before these gates run.
     """
 
     guide = running if forecast is None else max(running, forecast)
@@ -143,9 +140,7 @@ def no_board(
     if 1 <= lead < 4:
         best["yes_block"] = "高峰前1到4小时不加买"
     elif ask is not None and ask < _MIN_YES_ASK:
-        best["yes_block"] = "卖价低于0.20"
-    elif ask is not None and ask < _CHEAP_YES_ASK and lead > _CHEAP_YES_LEAD:
-        best["yes_block"] = "卖价低于0.25且离高峰超过1小时"
+        best["yes_block"] = "卖价低于0.35"
     elif (
         best["alive"]
         and ask is not None

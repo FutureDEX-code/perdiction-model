@@ -378,7 +378,7 @@ class NoTests(unittest.TestCase):
         )
         by_label = {row["label"]: row for row in rows}
         self.assertFalse(by_label["68-69°F"]["buy_yes"])
-        self.assertEqual(by_label["68-69°F"]["yes_block"], "卖价低于0.20")
+        self.assertEqual(by_label["68-69°F"]["yes_block"], "卖价低于0.35")
         self.assertFalse(by_label["70-71°F"]["buy_yes"])
 
     def test_mispriced_likely_bracket_is_still_bought(self):
@@ -390,8 +390,8 @@ class NoTests(unittest.TestCase):
             peak=14.5,
             forecast=70,
             fair=fair,
-            asks={"68-69°F": 0.25, "70-71°F": 0.41},
-            bids={"68-69°F": 0.22, "70-71°F": 0.38},
+            asks={"68-69°F": 0.40, "70-71°F": 0.41},
+            bids={"68-69°F": 0.36, "70-71°F": 0.38},
             overshoot=3,
         )
         by_label = {row["label"]: row for row in rows}
@@ -457,8 +457,8 @@ class NoTests(unittest.TestCase):
             peak=14.5,
             forecast=72,
             fair=fair,
-            asks={"72-73°F": 0.34},
-            bids={"72-73°F": 0.30},
+            asks={"72-73°F": 0.40},
+            bids={"72-73°F": 0.36},
             overshoot=3,
             city="nyc",
         )
@@ -472,8 +472,8 @@ class NoTests(unittest.TestCase):
             peak=14.75,
             forecast=31.0,
             fair=fair,
-            asks={"30°C": 0.30, "31°C": 0.40},
-            bids={"30°C": 0.28, "31°C": 0.36},
+            asks={"30°C": 0.40, "31°C": 0.45},
+            bids={"30°C": 0.36, "31°C": 0.40},
             city="hk",
         )
         climbing = no_board(hour=12.5, **common)
@@ -487,7 +487,7 @@ class NoTests(unittest.TestCase):
         self.assertTrue(by_late["30°C"]["buy_yes"])
         self.assertTrue(by_early["30°C"]["buy_yes"])
 
-    def test_cheap_yes_more_than_an_hour_before_the_peak_is_not_bought(self):
+    def test_yes_under_35_cents_is_not_bought_even_in_the_last_hour(self):
         fair = [_Fair(30, 0.55), _Fair(31, 0.30)]
         common = dict(
             running=29.0,
@@ -495,18 +495,19 @@ class NoTests(unittest.TestCase):
             peak=14.75,
             forecast=31.0,
             fair=fair,
-            bids={"30°C": 0.18, "31°C": 0.36},
+            bids={"30°C": 0.28, "31°C": 0.36},
             city="hk",
         )
-        early = no_board(hour=6.0, asks={"30°C": 0.22, "31°C": 0.40}, **common)
-        near = no_board(hour=14.2, asks={"30°C": 0.22, "31°C": 0.40}, **common)
-        pricey = no_board(hour=6.0, asks={"30°C": 0.30, "31°C": 0.40}, **common)
+        early = no_board(hour=6.0, asks={"30°C": 0.30, "31°C": 0.40}, **common)
+        near = no_board(hour=14.2, asks={"30°C": 0.30, "31°C": 0.40}, **common)
+        pricey = no_board(hour=6.0, asks={"30°C": 0.40, "31°C": 0.45}, **common)
         by_early = {row["label"]: row for row in early}
         by_near = {row["label"]: row for row in near}
         by_pricey = {row["label"]: row for row in pricey}
         self.assertFalse(by_early["30°C"]["buy_yes"])
-        self.assertEqual(by_early["30°C"]["yes_block"], "卖价低于0.25且离高峰超过1小时")
-        self.assertTrue(by_near["30°C"]["buy_yes"])
+        self.assertEqual(by_early["30°C"]["yes_block"], "卖价低于0.35")
+        self.assertFalse(by_near["30°C"]["buy_yes"])
+        self.assertEqual(by_near["30°C"]["yes_block"], "卖价低于0.35")
         self.assertTrue(by_pricey["30°C"]["buy_yes"])
 
     def test_first_hour_does_not_trade_yesterdays_maximum(self):

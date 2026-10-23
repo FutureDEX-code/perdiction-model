@@ -10,14 +10,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
+from collections import deque
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import ctp
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 TAPE = DATA / "ctp_tape.jsonl"
 LATEST = DATA / "ctp_latest.json"
@@ -26,14 +31,17 @@ FLOW = DATA / "ctp_flow"
 TZ = ZoneInfo("Asia/Shanghai")
 
 # 豆一、豆二、豆粕、豆油在大连，代码小写。菜粕在郑州，CTP 用一位年份：RM701 即 2701。
-INSTRUMENTS = ("a2701", "b2701", "m2701", "y2701", "RM701")
+# 豆二主连目前是 2611。2701 仍留给半小时行情。主连进程来问时按合约对上。
+INSTRUMENTS = ("a2701", "b2701", "b2611", "m2701", "y2701", "RM701")
 NAMES = {
     "a2701": "豆一2701",
     "b2701": "豆二2701",
+    "b2611": "豆二2611",
     "m2701": "豆粕2701",
     "y2701": "豆油2701",
     "rm701": "菜粕2701",
 }
+EXTRA_PORT = 8771
 
 
 def now_cn() -> str:
@@ -78,6 +86,10 @@ class Market(ctp.CThostFtdcMdSpi):
         self.ticks = 0
         self.latest: dict[str, dict] = {}
         self._req = 0
+        self._lock = threading.Lock()
+        self._minute: dict[str, dict] = {}
+        self._finished: dict[str, deque] = {}
+        self._cum: dict[str, float] = {}
 
     def OnFrontConnected(self) -> None:
         print(f"{now_cn()} 行情前置已连上", flush=True)
@@ -142,6 +154,7 @@ class Market(ctp.CThostFtdcMdSpi):
         }
         self.ticks += 1
         self.latest[code] = row
+        self._fold_minute(code, row)
         DATA.mkdir(parents=True, exist_ok=True)
         with TAPE.open("a") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -154,6 +167,103 @@ class Market(ctp.CThostFtdcMdSpi):
                 flush=True,
             )
 
+    def _fold_minute(self, code: str, row: dict) -> None:
+        """Remember the minute that just finished. The minute daemon asks for it."""
+
+        at = str(row.get("at") or "")
+        update = str(row.get("update") or "")
+        price = row.get("last")
+        if len(at) < 16 or len(update) < 8 or price is None or price <= 0:
+            return
+        if update >= "21:00:00" and at[11:19] < "21:00:00":
+            return
+        stamp = f"{at[:10]} {update[:5]}:00"
+        cum = row.get("volume")
+        with self._lock:
+            previous = self._cum.get(code)
+            delta = 0.0
+            if isinstance(cum, (int, float)) and isinstance(previous, (int, float)) and cum >= previous:
+                delta = cum - previous
+            if isinstance(cum, (int, float)):
+                self._cum[code] = cum
+            acc = self._minute.get(code)
+            if acc is None or acc["trade_time"] != stamp:
+                if acc is not None:
+                    self._finished.setdefault(code, deque(maxlen=30)).append(acc)
+                acc = {
+                    "trade_time": stamp,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "vol": delta,
+                    "oi": row.get("oi"),
+                    "bid": row.get("bid"),
+                    "ask": row.get("ask"),
+                    "bid_vol": row.get("bid_vol"),
+                    "ask_vol": row.get("ask_vol"),
+                    "pre_close": row.get("pre_close"),
+                    "pre_settle": row.get("pre_settle"),
+                }
+                self._minute[code] = acc
+                return
+            acc["high"] = max(acc["high"], price)
+            acc["low"] = min(acc["low"], price)
+            acc["close"] = price
+            acc["vol"] = (acc.get("vol") or 0.0) + delta
+            acc["oi"] = row.get("oi")
+            acc["bid"] = row.get("bid")
+            acc["ask"] = row.get("ask")
+            acc["bid_vol"] = row.get("bid_vol")
+            acc["ask_vol"] = row.get("ask_vol")
+            acc["pre_close"] = row.get("pre_close")
+            acc["pre_settle"] = row.get("pre_settle")
+
+    def snapshot(self) -> dict:
+        """One answer for the minute daemon: latest bid/ask, and minutes already closed."""
+
+        with self._lock:
+            quotes = {}
+            for code, row in self.latest.items():
+                quotes[code] = {
+                    "name": row.get("name"),
+                    "bid": row.get("bid"),
+                    "ask": row.get("ask"),
+                    "bid_vol": row.get("bid_vol"),
+                    "ask_vol": row.get("ask_vol"),
+                    "pre_close": row.get("pre_close"),
+                    "pre_settle": row.get("pre_settle"),
+                    "at": row.get("at"),
+                    "minutes": list(self._finished.get(code, ())),
+                }
+        return {"at": now_cn(), "quotes": quotes}
+
+
+class _LatestHandler(BaseHTTPRequestHandler):
+    spi: Market | None = None
+
+    def do_GET(self) -> None:
+        if self.path.split("?", 1)[0] != "/latest":
+            self.send_error(404)
+            return
+        spi = _LatestHandler.spi
+        body = json.dumps(spi.snapshot() if spi is not None else {"quotes": {}}, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args) -> None:
+        return
+
+
+def _serve_latest(spi: Market) -> None:
+    _LatestHandler.spi = spi
+    server = ThreadingHTTPServer(("127.0.0.1", EXTRA_PORT), _LatestHandler)
+    print(f"{now_cn()} 主连进程可来取独有行情 127.0.0.1:{EXTRA_PORT}/latest", flush=True)
+    server.serve_forever()
+
 
 def run(probe_seconds: int) -> int:
     cfg = load_cfg()
@@ -164,6 +274,7 @@ def run(probe_seconds: int) -> int:
     api.RegisterSpi(spi)
     api.RegisterFront(str(cfg["front"]))
     api.Init()
+    threading.Thread(target=_serve_latest, args=(spi,), daemon=True).start()
     started = time.time()
     next_beat = started + 30
     try:

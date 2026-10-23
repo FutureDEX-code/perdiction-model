@@ -8,11 +8,15 @@ close until these rows are long enough to test.
 
 from __future__ import annotations
 
+import sys
+
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 TAPE = DATA / "ctp_tape.jsonl"
 OUT = DATA / "session_tape.jsonl"

@@ -13,8 +13,14 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
+from pathlib import Path
 
-import train
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core import train
 
 HIDDEN = 8
 EPOCHS = 300
@@ -89,8 +95,7 @@ def predict(
 def _cached_rows() -> list[dict]:
     series = {}
     for key in ("A", "M", "RM", "S", "SM", "BO"):
-        bars = json.loads((train.DATA / f"{key}.json").read_text())
-        series[key] = {day: float(close) for day, close in bars}
+        series[key] = {day: close for day, close in train._cached_rows(train.series_path(key))}
     news = {str(k): float(v) for k, v in json.loads((train.DATA / "news.json").read_text()).items()}
     return [row for row in train.samples(series, news) if row["day"] >= "2017-01-01"]
 

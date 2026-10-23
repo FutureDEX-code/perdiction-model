@@ -5,3 +5,10 @@ venv/
 .DS_Store
 *.log
 data/
+training_dataset/sina_daily/*.json
+training_dataset/us_daily/*.json
+training_dataset/main_minute/*.csv
+training_dataset/main_minute/*.tmp
+training_dataset/news/*.json
+training_dataset/cot/*.json
+training_dataset/position/*.json

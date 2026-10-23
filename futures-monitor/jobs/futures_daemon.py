@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the futures board up, and refit the model from the 14:50 price.
+"""Keep the futures board up. Data refreshes in the afternoon. Models train at 20:30.
 
 Start with: python3 futures_daemon.py --daemon
 The process detaches from the terminal. It does not place orders.
@@ -16,7 +16,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 PY = "/opt/homebrew/bin/python3"
 TZ = ZoneInfo("Asia/Shanghai")
 LOG = ROOT / "futures-daemon.log"
@@ -35,12 +37,12 @@ def _pids(mark: str) -> list[int]:
 
 
 def ensure_board() -> None:
-    if _pids("monitor.py --web"):
+    if _pids("live.monitor --web"):
         return
     log = open(ROOT / "monitor.log", "a")
     err = open(ROOT / "monitor.err.log", "a")
     proc = subprocess.Popen(
-        [PY, "monitor.py", "--web", "--port", "8765"],
+        [PY, "-m", "live.monitor", "--web", "--port", "8765"],
         cwd=ROOT,
         stdout=log,
         stderr=err,
@@ -51,7 +53,7 @@ def ensure_board() -> None:
 
 def train_if_due() -> None:
     now = datetime.now(TZ)
-    # 14:50 的价格当作收盘。四个合约都到了才训练，不等到 15:00。
+    # 下午只补数据并给出方向。20 个模型留到 20:30 训练。
     if (now.hour, now.minute) < (14, 50):
         return
     today = now.date().isoformat()
@@ -63,15 +65,16 @@ def train_if_due() -> None:
         retry_after = datetime.fromisoformat(stamp.read_text().strip())
         if now < retry_after:
             return
-    print(f"running train.py {now:%Y-%m-%d %H:%M}", flush=True)
-    result = subprocess.run([PY, "train.py"], cwd=ROOT)
+    print(f"refreshing data {now:%Y-%m-%d %H:%M}", flush=True)
+    result = subprocess.run([_venv(), "-u", "-m", "jobs.evening_compare", "--refresh"], cwd=ROOT)
     if result.returncode == 0:
         TRAINED.write_text(today)
         stamp.unlink(missing_ok=True)
-        print("train.py finished", flush=True)
-        tape = subprocess.run([PY, "session_tape.py", today], cwd=ROOT, capture_output=True, text=True)
+        print("data refresh finished", flush=True)
+        tape = subprocess.run([PY, "-m", "jobs.session_tape", today], cwd=ROOT, capture_output=True, text=True)
         print((tape.stdout or tape.stderr).strip() or f"session_tape {tape.returncode}", flush=True)
-        mail_outlook()
+        snapshot_1450()
+        mail_1450()
         return
     print(f"train.py failed {result.returncode}", flush=True)
     if (now.hour, now.minute) < (15, 0):
@@ -90,22 +93,24 @@ def session_tape_if_due() -> None:
     mark = ROOT / "data" / "session_tape_day.txt"
     if mark.exists() and mark.read_text().strip() == today:
         return
-    result = subprocess.run([PY, "session_tape.py", today], cwd=ROOT, capture_output=True, text=True)
+    result = subprocess.run([PY, "-m", "jobs.session_tape", today], cwd=ROOT, capture_output=True, text=True)
     text = (result.stdout or result.stderr).strip()
     print(text or f"session_tape {result.returncode}", flush=True)
     if text.startswith("盘面记下") or text.startswith("盘面已记"):
         mark.write_text(today)
 
 
-def mail_outlook() -> None:
-    result = subprocess.run([PY, "mail_outlook.py"], cwd=ROOT, capture_output=True, text=True)
+def mail_1450() -> None:
+    """The one afternoon mail. 20:30 sends the second. Logistic and tree are not mailed apart."""
+
+    result = subprocess.run([_venv(), "-u", "-m", "jobs.evening_compare", "--mail1450"], cwd=ROOT, capture_output=True, text=True)
     text = (result.stdout or result.stderr).strip()
     if result.returncode == 0:
         if text.startswith("already sent"):
             return
-        print(f"mail {text}", flush=True)
+        print(f"14:50 mail {text.splitlines()[-1] if text else 'sent'}", flush=True)
         return
-    print(f"mail failed {text}", flush=True)
+    print(f"14:50 mail failed {text}", flush=True)
 
 
 def _market_open(now: datetime) -> bool:
@@ -129,7 +134,7 @@ def tape_mail_if_due() -> None:
     mark = ROOT / "data" / "tape_emailed_hour.txt"
     if mark.exists() and mark.read_text().strip() == key:
         return
-    result = subprocess.run([PY, "mail_tape.py"], cwd=ROOT, capture_output=True, text=True)
+    result = subprocess.run([PY, "-m", "jobs.mail_tape"], cwd=ROOT, capture_output=True, text=True)
     text = (result.stdout or result.stderr).strip()
     print(text or f"tape mail {result.returncode}", flush=True)
     if result.returncode == 0 and text.startswith("sent"):
@@ -137,28 +142,92 @@ def tape_mail_if_due() -> None:
         mark.write_text(key + "\n")
 
 
+def _venv() -> str:
+    return str(ROOT / ".venv/bin/python3")
+
+
+def snapshot_1450() -> None:
+    """Keep the afternoon directions so 20:30 can compare against them."""
+
+    result = subprocess.run([_venv(), "-u", "-m", "jobs.evening_compare", "--snapshot"], cwd=ROOT, capture_output=True, text=True)
+    text = (result.stdout or result.stderr).strip()
+    print(text or f"snapshot {result.returncode}", flush=True)
+
+
+def snapshot_if_missing() -> None:
+    now = datetime.now(TZ)
+    if (now.hour, now.minute) < (14, 50):
+        return
+    today = now.date().isoformat()
+    if not TRAINED.exists() or TRAINED.read_text().strip() != today:
+        return
+    if (ROOT / "data" / "compare" / f"{today}_1450.json").exists():
+        return
+    snapshot_1450()
+
+
+def evening_if_due() -> None:
+    """The only daily fit. Afternoon has already stored today's direction."""
+
+    now = datetime.now(TZ)
+    if (now.hour, now.minute) < (20, 30):
+        return
+    today = now.date().isoformat()
+    mark = ROOT / "data" / "evening_compared.txt"
+    if mark.exists() and mark.read_text().strip() == today:
+        return
+    if not (ROOT / "data" / "compare" / f"{today}_1450.json").exists():
+        return
+    print(f"running 20:30 compare {now:%Y-%m-%d %H:%M}", flush=True)
+    result = subprocess.run([_venv(), "-u", "-m", "jobs.evening_compare"], cwd=ROOT)
+    if result.returncode == 0:
+        mark.write_text(today)
+        print("20:30 compare finished", flush=True)
+        review = subprocess.run([_venv(), "-u", "-m", "jobs.review"], cwd=ROOT, capture_output=True, text=True)
+        print((review.stdout or review.stderr).strip() or f"review {review.returncode}", flush=True)
+        return
+    print(f"20:30 compare failed {result.returncode}", flush=True)
+
+
+def halfmonth_if_due() -> None:
+    """The 1st and 16th review mail, after the evening compare."""
+
+    now = datetime.now(TZ)
+    today = now.date().isoformat()
+    if now.day not in (1, 16) or (now.hour, now.minute) < (20, 35):
+        return
+    mark = ROOT / "data" / "halfmonth_reviewed.txt"
+    if mark.exists() and mark.read_text().strip() == today:
+        return
+    result = subprocess.run([_venv(), "-u", "-m", "jobs.review", "--halfmonth"], cwd=ROOT, capture_output=True, text=True)
+    text = (result.stdout or result.stderr).strip()
+    print(text.splitlines()[-1] if text else f"halfmonth {result.returncode}", flush=True)
+    if result.returncode == 0:
+        mark.write_text(today)
+
+
 def mail_if_due() -> None:
-    """Retry Gmail after 14:50 until today's outlook has been sent. Never uses the company mailbox."""
+    """Retry the single 14:50 mail. The 20:30 mail is separate. Never the company mailbox."""
 
     now = datetime.now(TZ)
     if (now.hour, now.minute) < (14, 50):
         return
-    outlook = ROOT / "data" / "outlook.json"
-    if not outlook.exists():
+    today = now.date().isoformat()
+    sent = ROOT / "data" / "futures_1450_emailed.txt"
+    if sent.exists() and sent.read_text().strip() == today:
         return
-    view = json.loads(outlook.read_text())
-    if str(view.get("as_of") or "") != now.date().isoformat():
+    if not (ROOT / "data" / "compare" / f"{today}_1450.json").exists():
         return
-    mail_outlook()
+    mail_1450()
 
 
 def ensure_tape() -> None:
-    if _pids("tape.py"):
+    if _pids("live.tape"):
         return
     out = open(ROOT / "tape.log", "a")
     err = open(ROOT / "tape.err.log", "a")
     proc = subprocess.Popen(
-        [PY, "-u", "tape.py"],
+        [PY, "-u", "-m", "live.tape"],
         cwd=ROOT,
         stdout=out,
         stderr=err,
@@ -170,11 +239,11 @@ def ensure_tape() -> None:
 def ensure_quotes() -> None:
     """Keep the SimNow recorder up. The venv has CTP; the system Python does not."""
 
-    if _pids("simnow_md.py"):
+    if _pids("live.simnow_md"):
         return
     out = open(ROOT / "simnow_md.log", "a")
     proc = subprocess.Popen(
-        [str(ROOT / ".venv/bin/python3"), "-u", "simnow_md.py"],
+        [str(ROOT / ".venv/bin/python3"), "-u", "-m", "live.simnow_md"],
         cwd=ROOT,
         stdout=out,
         stderr=out,
@@ -191,6 +260,9 @@ def serve() -> None:
             ensure_tape()
             ensure_quotes()
             train_if_due()
+            snapshot_if_missing()
+            evening_if_due()
+            halfmonth_if_due()
             session_tape_if_due()
             mail_if_due()
             tape_mail_if_due()

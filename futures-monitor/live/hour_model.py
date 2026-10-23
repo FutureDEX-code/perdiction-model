@@ -7,12 +7,16 @@ It is refit from the tape each time. Weights are not written into data/models.
 
 from __future__ import annotations
 
+import sys
+
 import json
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 TAPE = ROOT / "data" / "ctp_tape.jsonl"
 NAMES = ("豆一2701", "豆二2701", "豆粕2701", "菜粕2701", "豆油2701")
 SESSIONS = ((9 * 60, 10 * 60 + 15), (10 * 60 + 30, 11 * 60 + 30), (13 * 60 + 30, 15 * 60), (21 * 60, 23 * 60))
@@ -80,44 +84,39 @@ def _clock(day: str, minutes: int) -> str:
     return f"{day} {minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def _full_slot(day: str, start_min: int) -> str | None:
-    """A half-hour bucket that sits entirely inside one session. The 10:15 stub is not one."""
+def _segments() -> list[tuple[int, int]]:
+    """Half-hour bars inside every session, plus the 10:00-10:15 stub. Sessions chain."""
 
-    end_min = start_min + SLOT
-    probe = f"{_clock(day, start_min)}:30"
-    session = _session(probe)
-    if session is None:
-        return None
-    sess_start, sess_end = session
-    if start_min < sess_start or end_min > sess_end:
-        return None
-    return _clock(day, start_min)
-
-
-def _completed_slot(now: datetime) -> tuple[str, str] | None:
-    """The half hour that just closed, if that whole half hour was in one session."""
-
-    local = now.replace(tzinfo=None)
-    end_min = (local.hour * 60 + local.minute) // SLOT * SLOT
-    start_min = end_min - SLOT
-    if start_min < 0:
-        return None
-    day = local.strftime("%Y-%m-%d")
-    slot = _full_slot(day, start_min)
-    if slot is None:
-        return None
-    return slot, _clock(day, end_min)
+    out = []
+    for start, end in SESSIONS:
+        mark = start
+        while mark + SLOT <= end:
+            out.append((mark, mark + SLOT))
+            mark += SLOT
+        if mark < end:
+            out.append((mark, end))
+    return out
 
 
-def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None]]:
-    """Finished half-hour pairs, and the half hour that just closed inside this session."""
+SEGMENTS = _segments()
+
+
+def _segment_of(at: str) -> tuple[int, int] | None:
+    minutes = _minutes(at)
+    for start, end in SEGMENTS:
+        if start <= minutes < end:
+            return start, end
+    return None
+
+
+def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None], dict[tuple[str, str], dict]]:
+    """Bars chain across breaks: every sample is one bar, its label the next bar's close."""
 
     stamps: dict[tuple[str, str], dict] = {}
-    live = {name: _bar() for name in NAMES}
     cutoff = now.strftime("%Y-%m-%d %H:%M:%S")
-    done = _completed_slot(now)
+    empty_end: dict[tuple[str, str], dict] = {}
     if not TAPE.exists():
-        return {name: [] for name in NAMES}, {name: None for name in NAMES}
+        return {name: [] for name in NAMES}, {name: None for name in NAMES}, empty_end
     with TAPE.open() as handle:
         for line in handle:
             row = json.loads(line)
@@ -131,36 +130,40 @@ def _load(now: datetime) -> tuple[dict[str, list[dict]], dict[str, dict | None]]
                 continue
             if price <= 0:
                 continue
-            start_min = (_minutes(at) // SLOT) * SLOT
-            slot = _full_slot(at[:10], start_min)
-            # An open half hour is not a sample and not the bar we forecast from.
-            if slot is None or _clock(at[:10], start_min + SLOT) > cutoff[:16]:
+            segment = _segment_of(at)
+            if segment is None:
                 continue
+            start_min, end_min = segment
+            # An unfinished bar is not a sample and not the bar we forecast from.
+            end_text = f"{at[:10]} {end_min // 60:02d}:{end_min % 60:02d}:00"
+            if end_text > cutoff:
+                continue
+            slot = _clock(at[:10], start_min)
             key = (slot, name)
             bar = stamps.get(key)
             if bar is None:
                 bar = _bar()
+                bar["end"] = _clock(at[:10], end_min)
                 stamps[key] = bar
             _add(bar, price)
-            if done is not None and slot == done[0]:
-                _add(live[name], price)
-    samples: dict[str, list[dict]] = {name: [] for name in NAMES}
     by_name: dict[str, list[tuple[str, dict]]] = {name: [] for name in NAMES}
     for (stamp, name), bar in stamps.items():
         feat = _features(bar)
         if feat is not None:
-            by_name[name].append((stamp, {**feat, "close": bar["c"]}))
+            by_name[name].append((stamp, {**feat, "open": bar["o"], "close": bar["c"], "end": bar["end"]}))
+    samples: dict[str, list[dict]] = {name: [] for name in NAMES}
+    live_feat: dict[str, dict | None] = {name: None for name in NAMES}
+    by_end: dict[tuple[str, str], dict] = {}
     for name in NAMES:
         rows = sorted(by_name[name])
-        for (left, prev), (right, nxt) in zip(rows, rows[1:]):
-            start = datetime.strptime(left, "%Y-%m-%d %H:%M")
-            end = datetime.strptime(right, "%Y-%m-%d %H:%M")
-            if end - start == timedelta(minutes=SLOT):
-                samples[name].append({**prev, "y": nxt["close"] - prev["close"]})
-    live_feat = {}
-    for name in NAMES:
-        live_feat[name] = _features(live[name]) if done is not None else None
-    return samples, live_feat
+        if not rows:
+            continue
+        live_feat[name] = rows[-1][1]
+        for (_left, prev), (_right, nxt) in zip(rows, rows[1:]):
+            samples[name].append({**prev, "y": nxt["close"] - prev["close"]})
+        for _start, feat in rows:
+            by_end[(name, feat["end"])] = feat
+    return samples, live_feat, by_end
 
 
 def _fit(samples: list[dict], live: dict) -> dict | None:
@@ -217,11 +220,14 @@ def _fit(samples: list[dict], live: dict) -> dict | None:
         "ret": live["ret"],
         "rng": live["rng"],
         "loc": live["loc"],
+        "end": live.get("end"),
     }
 
 
-def forecast(now: datetime) -> dict[str, dict | None]:
-    samples, live = _load(now)
+def prepare(now: datetime) -> tuple[dict[str, dict | None], dict[tuple[str, str], dict]]:
+    """Forecasts, plus every finished bar keyed by (name, end 'YYYY-MM-DD HH:MM')."""
+
+    samples, live, by_end = _load(now)
     out: dict[str, dict | None] = {}
     for name in NAMES:
         if live[name] is None:
@@ -229,4 +235,9 @@ def forecast(now: datetime) -> dict[str, dict | None]:
             continue
         fitted = _fit(samples[name], live[name])
         out[name] = fitted if fitted is not None else {"n": len(samples[name]), **live[name]}
-    return out
+    return out, by_end
+
+
+def forecast(now: datetime) -> dict[str, dict | None]:
+    views, _bars = prepare(now)
+    return views

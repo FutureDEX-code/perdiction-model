@@ -10,8 +10,7 @@ from datetime import datetime
 
 from hk_temp_model.climatology import load_climatology
 from hk_temp_model.decide import format_no_board, no_board
-from hk_temp_model.live import execute, exit_hopeless
-from hk_temp_model.paper import settle_scored, status_line as paper_status
+from hk_temp_model.paper import note_fills, settle_scored, status_line as paper_status
 from hk_temp_model.market import fetch_yes_book
 from hk_temp_model import intl
 from hk_temp_model.learn import load_state, save_state, verify_settled
@@ -140,9 +139,7 @@ def _emit_hk(args, climatology, state) -> None:
     for note in notes:
         print(note, flush=True)
     if trade:
-        for note in exit_hopeless("hk", obs.observed_at.date(), nos):
-            print(note, flush=True)
-        for note in execute("hk", obs.observed_at.date(), result.observed_at, nos):
+        for note in note_fills("hk", obs.observed_at.date(), result.observed_at, nos):
             print(note, flush=True)
     for note in settle_scored("hk", state.scored):
         print(note, flush=True)
@@ -193,9 +190,7 @@ def _emit_intl(args, city: intl.CitySpec, state: intl.IntlOnlineState) -> None:
     for note in notes:
         print(note, flush=True)
     if trade:
-        for note in exit_hopeless(city.key, obs.observed_at.date(), nos):
-            print(note, flush=True)
-        for note in execute(city.key, obs.observed_at.date(), result.observed_at, nos):
+        for note in note_fills(city.key, obs.observed_at.date(), result.observed_at, nos):
             print(note, flush=True)
     for note in settle_scored(city.key, state.scored):
         print(note, flush=True)
