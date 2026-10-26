@@ -2214,7 +2214,8 @@
     "price": 0.29,
     "usd": 5.0,
     "shares": 17.2414,
-    "pnl": null
+    "pnl": -5.0,
+    "won": false
   },
   {
     "city": "hk",
@@ -2226,7 +2227,8 @@
     "price": 0.83,
     "usd": 5.0,
     "shares": 6.0241,
-    "pnl": null
+    "pnl": -5.0,
+    "won": false
   },
   {
     "city": "hk",
@@ -2238,6 +2240,123 @@
     "price": 0.503,
     "usd": 5.0,
     "shares": 9.9404,
+    "pnl": 4.9404,
+    "won": true
+  },
+  {
+    "city": "nyc",
+    "day": "2026-10-23",
+    "observed_at": "2026-10-23 14:51 ET",
+    "label": "60-61°F",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.94,
+    "usd": 5.0,
+    "shares": 5.3191,
+    "pnl": 0.3191,
+    "won": true
+  },
+  {
+    "city": "hk",
+    "day": "2026-10-24",
+    "observed_at": "2026-10-24 07:30 HKT",
+    "label": "31°C",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.35,
+    "usd": 5.0,
+    "shares": 14.2857,
+    "pnl": 9.2857,
+    "won": true
+  },
+  {
+    "city": "paris",
+    "day": "2026-10-24",
+    "observed_at": "2026-10-24 14:30 CEST",
+    "label": "13°C",
+    "side": "NO",
+    "reason": "到不了",
+    "price": 0.47,
+    "usd": 5.0,
+    "shares": 10.6383,
+    "pnl": -5.0,
+    "won": false
+  },
+  {
+    "city": "paris",
+    "day": "2026-10-24",
+    "observed_at": "2026-10-24 14:30 CEST",
+    "label": "14°C",
+    "side": "NO",
+    "reason": "到不了",
+    "price": 0.91,
+    "usd": 5.0,
+    "shares": 5.4945,
+    "pnl": 0.4945,
+    "won": true
+  },
+  {
+    "city": "nyc",
+    "day": "2026-10-24",
+    "observed_at": "2026-10-24 14:51 ET",
+    "label": "62-63°F",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.96,
+    "usd": 5.0,
+    "shares": 5.2083,
+    "pnl": 0.2083,
+    "won": true
+  },
+  {
+    "city": "hk",
+    "day": "2026-10-25",
+    "observed_at": "2026-10-25 13:50 HKT",
+    "label": "30°C",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.76,
+    "usd": 5.0,
+    "shares": 6.5789,
+    "pnl": 1.5789,
+    "won": true
+  },
+  {
+    "city": "paris",
+    "day": "2026-10-25",
+    "observed_at": "2026-10-25 14:30 CEST",
+    "label": "16°C",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.899,
+    "usd": 5.0,
+    "shares": 5.5617,
+    "pnl": 0.5617,
+    "won": true
+  },
+  {
+    "city": "nyc",
+    "day": "2026-10-25",
+    "observed_at": "2026-10-25 14:51 ET",
+    "label": "66-67°F",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.94,
+    "usd": 5.0,
+    "shares": 5.3191,
+    "pnl": 0.3191,
+    "won": true
+  },
+  {
+    "city": "hk",
+    "day": "2026-10-26",
+    "observed_at": "2026-10-26 09:50 HKT",
+    "label": "29°C",
+    "side": "YES",
+    "reason": "模型高于卖价",
+    "price": 0.36,
+    "usd": 5.0,
+    "shares": 13.8889,
     "pnl": null
   }
 ]
