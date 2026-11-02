@@ -30,6 +30,9 @@ PRODUCTS = (
     ("M", "DCE"),
     ("Y", "DCE"),
     ("RM", "ZCE"),
+    ("P", "DCE"),
+    ("OI", "ZCE"),
+    ("PK", "ZCE"),
 )
 FIELDS = ("trade_time", "open", "high", "low", "close", "vol", "amount", "oi")
 EXTRAS = ("bid", "ask", "bid_vol", "ask_vol", "pre_close", "pre_settle")

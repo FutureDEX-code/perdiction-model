@@ -237,8 +237,6 @@ def build_rows(products: dict, overseas: dict, news: dict) -> list[dict]:
     overseas_days = {key: sorted(overseas[key]) for key in train.OVERSEAS}
     cot = train.cot_series()
     seats = train.seat_series()
-    alpha = 2 / (3 + 1)
-    ema = 0.0
     rows = []
     dates = {key: products[key]["dates"] for key in products}
     for prev, day in zip(common, common[1:]):
@@ -246,8 +244,6 @@ def build_rows(products: dict, overseas: dict, news: dict) -> list[dict]:
             continue
         if any(products[key]["ret"][prev] is None for key in ("A", "M", "RM")):
             continue
-        raw_news = train.news_before(news, prev, day)
-        ema = alpha * raw_news + (1 - alpha) * ema
         named = {
             "豆一昨涨跌": products["A"]["ret"][prev],
             "豆粕昨涨跌": products["M"]["ret"][prev],
@@ -258,8 +254,6 @@ def build_rows(products: dict, overseas: dict, news: dict) -> list[dict]:
             "豆一这段": products["A"]["swing"][prev],
             "豆粕这段": products["M"]["swing"][prev],
             "菜粕这段": products["RM"]["swing"][prev],
-            "新闻倾向": raw_news,
-            "新闻三日": ema,
         }
         named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
         for key in ("B", "Y"):

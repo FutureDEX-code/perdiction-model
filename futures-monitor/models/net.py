@@ -96,8 +96,7 @@ def _cached_rows() -> list[dict]:
     series = {}
     for key in ("A", "M", "RM", "S", "SM", "BO"):
         series[key] = {day: close for day, close in train._cached_rows(train.series_path(key))}
-    news = {str(k): float(v) for k, v in json.loads((train.DATA / "news.json").read_text()).items()}
-    return [row for row in train.samples(series, news) if row["day"] >= "2017-01-01"]
+    return [row for row in train.samples(series) if row["day"] >= "2017-01-01"]
 
 
 def _score(key: str, model, rows: list[dict], mean: list[float], scale: list[float]) -> tuple[int, float, float]:

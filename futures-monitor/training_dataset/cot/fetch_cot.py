@@ -4,7 +4,7 @@
 Each file under training_dataset/cot/ is one market. A record keeps the fund
 (non-commercial) long and short, the commercial long and short, and open
 interest. The report lands Friday Beijing time with Tuesday positions, so the
-20:30 training job refreshes it; models do not read these files yet.
+20:30 prediction refreshes it; models do not read these files yet.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ MARKETS = {
     "SOYBEANS": "SOYBEANS - CHICAGO BOARD OF TRADE",
     "SOYBEAN_MEAL": "SOYBEAN MEAL - CHICAGO BOARD OF TRADE",
     "SOYBEAN_OIL": "SOYBEAN OIL - CHICAGO BOARD OF TRADE",
+    "CANOLA": "CANOLA - ICE FUTURES U.S.",
 }
 # Legacy futures-only layout, fields after the name and codes.
 I_DATE = 2

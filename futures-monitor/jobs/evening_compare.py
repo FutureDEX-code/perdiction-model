@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""At 20:30, refit all 20 models on whatever arrived after the afternoon run.
+"""At 20:30, predict again with the models already on disk.
 
-The afternoon snapshot is the direction already given. This script does not
-replace that mail and does not write a new paper trade. China night session
-opens at 21:00, so the new inputs are the US daily bar and headlines.
+New inputs since 14:50 are scored. The weights are not refit. The afternoon
+snapshot stays the direction already given. This script does not replace that
+mail and does not write a new paper trade. China night session opens at 21:00,
+so the new inputs are the US daily bar and the position reports.
 """
 
 from __future__ import annotations
@@ -105,25 +106,16 @@ def minute_forward(days: dict[str, dict], overseas: dict, news: dict) -> tuple[s
     """Features of the last minute day, the same way a training row is built."""
 
     closes = {key: {day: slot["close"] for day, slot in book.items()} for key, book in days.items()}
-    domestic = {key: train.returns(closes[key]) for key in days}
-    swings = {
-        key: dict(zip(sorted(closes[key]), train.swing_path([closes[key][day] for day in sorted(closes[key])])))
-        for key in days
-    }
+    domestic = {key: train.session_returns(key, closes[key]) for key in days}
+    swings = {key: train.session_swing(key, closes[key]) for key in days}
     common = [day for day in sorted(set(swings["A"]) & set(swings["M"]) & set(swings["RM"])) if day >= "2017-01-01"]
     overseas_days = {key: sorted(overseas[key]) for key in train.OVERSEAS}
-    alpha = 2 / (3 + 1)
-    ema = 0.0
     for prev, day in zip(common, common[1:]):
         if any(train.latest_on_or_before(overseas_days[key], prev) is None for key in train.OVERSEAS):
             continue
         if any(prev not in domestic[key] or prev not in swings[key] for key in ("A", "M", "RM")):
             continue
-        raw_news = train.news_before(news, prev, day)
-        ema = alpha * raw_news + (1 - alpha) * ema
     last = common[-1]
-    raw = train.news_before(news, last, "9999-99-99")
-    ema = alpha * raw + (1 - alpha) * ema
     cutoff = train._day_after(last)
     named = {
         "豆一昨涨跌": domestic["A"][last],
@@ -135,8 +127,6 @@ def minute_forward(days: dict[str, dict], overseas: dict, news: dict) -> tuple[s
         "豆一这段": swings["A"][last],
         "豆粕这段": swings["M"][last],
         "菜粕这段": swings["RM"][last],
-        "新闻倾向": raw,
-        "新闻三日": ema,
     }
     named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
     for key in ("B", "Y"):
@@ -244,7 +234,6 @@ def refresh() -> None:
             "日线收盘 " + " ".join(f"{train.NAMES[key]}{series[key][today]:.0f}" for key in train.DOMESTIC),
             flush=True,
         )
-    train.fetch_news()
     view = train.outlook(series, train.load_models())
     (train.DATA / "outlook.json").write_text(json.dumps(view, ensure_ascii=False, indent=2))
     from models import paper_book
@@ -423,7 +412,7 @@ def _body(as_of: str, before: dict, after: dict) -> str:
     prev = _prev_day(as_of)
     lines = [
         f"20:30 方向。下一交易日。",
-        f"新信息从上一交易日 {prev} 20:30 到这次 {as_of} 20:30，20 个模型按这段重训。",
+        f"新信息从上一交易日 {prev} 20:30 到这次 {as_of} 20:30。模型不重训，用现有权重再预测一次。",
         "这封和今天 14:50 的方向对照。开仓仍按 14:50 那封。",
         "",
         _minute_span(prev),
@@ -528,13 +517,9 @@ def evening() -> None:
     if out_path.exists():
         payload = json.loads(out_path.read_text())
     else:
-        print("拉取美盘和新闻", flush=True)
+        print("拉取美盘", flush=True)
         series = train.load_series()
-        try:
-            news = train.fetch_news()
-        except Exception as exc:
-            news = train.news_scores()
-            print(f"新闻拉取失败，沿用已有新闻 {exc}", flush=True)
+        news = {}
         try:
             from training_dataset.cot import fetch_cot
 
@@ -551,10 +536,7 @@ def evening() -> None:
         except Exception as exc:
             print(f"持仓排名拉取失败，沿用已有文件 {exc}", flush=True)
         days = _load_days()
-        print("重训 20 个模型", flush=True)
-        _refit_logit(series, news)
-        mail_tree._fit_views(series, mail_tree._named(series))
-        _refit_minute(series, news, days)
+        print("沿用已有的 20 个模型，不再重训", flush=True)
         payload = score_all(series, days, news)
         payload["taken_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
         payload["role"] = "20:30"
@@ -586,7 +568,7 @@ def mail_1450() -> None:
     ]
     lines.extend(_direction_lines(payload))
     lines.append("45%到55%之间不下新单。")
-    lines.append(f"20:30 会用 {prev} 20:30 到当时的新信息再训一遍，方向和差别另发一封。")
+    lines.append(f"20:30 会用 {prev} 20:30 到当时的新信息再预测一次，模型不重训，方向和差别另发一封。")
     body = "\n".join(lines)
     print(body, flush=True)
     _mail(f"下一交易日方向（14:50，基于{as_of}）", body)

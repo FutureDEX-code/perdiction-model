@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Exchange member position ranks, stored per product under training_dataset/position/.
 
-Today only 菜粕 is covered: the Zhengzhou exchange publishes a daily text table
-anyone can read. The Dalian exchange blocks this network, so 豆一/豆二/豆粕/豆油
-wait for a Tushare fut_holding permission on the token.
+菜粕、菜籽油、花生 are covered: the Zhengzhou exchange publishes a daily text
+table anyone can read. The Dalian exchange blocks this network, so
+豆一/豆二/豆粕/豆油/棕榈油 wait for a Tushare fut_holding permission on the token.
 
 A record keeps the top-20 long and short totals with their day changes.
 """
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "training_dataset" / "position"
 UA = {"User-Agent": "Mozilla/5.0"}
 CZCE_TXT = "http://www.czce.com.cn/cn/DFSStaticFiles/Future/{year}/{day8}/FutureDataHolding.txt"
-CZCE_PRODUCTS = {"RM": "菜粕RM"}
+CZCE_PRODUCTS = {"RM": "菜粕RM", "OI": "菜油OI", "PK": "花生PK"}
 
 
 def _get(url: str) -> str:
@@ -107,20 +107,46 @@ def update(day: str | None = None) -> dict[str, dict]:
     return got
 
 
+def _have(product: str) -> set[str]:
+    path = OUT / f"{product}.json"
+    if not path.exists():
+        return set()
+    return {row["日期"] for row in json.loads(path.read_text())}
+
+
 def seed(days: list[str]) -> None:
+    """Fill days still missing from any covered product. Already-stored days are skipped."""
+
+    have = {product: _have(product) for product in CZCE_PRODUCTS}
+    pending: dict[str, list[dict]] = {product: [] for product in CZCE_PRODUCTS}
     total = 0
+    asked = 0
     for index, day in enumerate(days, start=1):
+        needed = [product for product in CZCE_PRODUCTS if product != "PK" or day >= "2021-02-01"]
+        if all(day in have[product] for product in needed):
+            continue
+        asked += 1
         try:
             got = fetch_day(day)
         except Exception:
             continue
         for product, row in got.items():
-            _merge(OUT / f"{product}.json", [row])
-        total += len(got)
-        if index % 200 == 0:
-            print(f"{index}/{len(days)} 累计 {total}", flush=True)
+            if row["日期"] in have[product]:
+                continue
+            pending[product].append(row)
+            have[product].add(row["日期"])
+            total += 1
+        if asked % 100 == 0:
+            for product, rows in pending.items():
+                if rows:
+                    _merge(OUT / f"{product}.json", rows)
+                    pending[product] = []
+            print(f"{index}/{len(days)} 新写入 {total}", flush=True)
         time.sleep(0.12)
-    print(f"补历史完成 {total} 条", flush=True)
+    for product, rows in pending.items():
+        if rows:
+            _merge(OUT / f"{product}.json", rows)
+    print(f"补历史完成 新写入 {total} 条", flush=True)
 
 
 if __name__ == "__main__":

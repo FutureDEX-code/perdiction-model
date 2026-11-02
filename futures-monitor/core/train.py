@@ -2,7 +2,8 @@
 """Train next-session direction for 豆一 / 豆二 / 豆粕 / 菜粕 / 豆油.
 
 The inputs are shared: previous close-to-close returns, the latest finished
-CBOT session, the swing, and the news score. Each contract then has its own
+CBOT session, and the swing. The news score is kept on disk but is not a
+feature. Each contract then has its own
 logistic model, fit only on whether that contract's next close is up, and
 stored in its own file under data/models/. Changing one file does not rewrite
 the other two. data/model.json is rebuilt from those three files for the board.
@@ -17,6 +18,7 @@ import json
 import math
 import sys
 import urllib.request
+from bisect import bisect_right
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -28,10 +30,14 @@ DATA = ROOT / "data"
 SINA_DAILY = ROOT / "training_dataset" / "sina_daily"
 US_DAILY = ROOT / "training_dataset" / "us_daily"
 MAIN_MINUTE = ROOT / "training_dataset" / "main_minute"
-NEWS_DAILY = ROOT / "training_dataset" / "news"
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
 DOMESTIC = {"A": "A0", "B": "B0", "M": "M0", "RM": "RM0", "Y": "Y0"}
+# Download-only symbols: archived next to the five, never read by training.
+SINA_EXTRA = {"P": "P0", "OI": "OI0", "PK": "PK0"}
+EXTRA_NAMES = {"P": "棕榈油", "OI": "菜籽油", "PK": "花生"}
 OVERSEAS = {"S": "S", "SM": "SM", "BO": "BO"}
+# Archive-only overseas series: fetched alongside, never read by current features.
+OVERSEAS_EXTRA = {"FCPO": "FCPO"}
 NAMES = {"A": "豆一", "B": "豆二", "M": "豆粕", "RM": "菜粕", "Y": "豆油"}
 CONTRACTS = ("A", "M", "RM", "B", "Y")
 
@@ -39,9 +45,9 @@ CONTRACTS = ("A", "M", "RM", "B", "Y")
 def series_path(key: str) -> Path:
     """Domestic closes live with the Sina daily service. US closes live with the US daily set."""
 
-    if key in DOMESTIC:
+    if key in DOMESTIC or key in SINA_EXTRA:
         return SINA_DAILY / f"{key}.json"
-    if key in OVERSEAS:
+    if key in OVERSEAS or key in OVERSEAS_EXTRA:
         return US_DAILY / f"{key}.json"
     return DATA / f"{key}.json"
 DAILY_EXTRA = ("振幅", "位置", "量变化", "仓变化")
@@ -70,7 +76,6 @@ FEATURE_NAMES = (
     "豆一这段",
     "豆粕这段",
     "菜粕这段",
-    "新闻倾向",
 )
 # 豆二、豆油再加自己的两列。豆二和菜粕另用一组：去掉豆一，新闻用三日平滑，菜粕再用价差波段。
 B_FEATURES = (
@@ -81,7 +86,6 @@ B_FEATURES = (
     "美豆油隔夜",
     "豆粕这段",
     "菜粕这段",
-    "新闻三日",
     "豆二昨涨跌",
     "豆二这段",
 )
@@ -93,43 +97,12 @@ RM_FEATURES = (
     "美豆油隔夜",
     "豆粕这段",
     "菜粕价差波段",
-    "新闻三日",
 )
 Y_FEATURES = FEATURE_NAMES + ("豆油昨涨跌", "豆油这段")
 MODELS = DATA / "models"
-NEWS_WORDS = ("豆粕", "菜粕", "大豆", "美豆", "菜籽")
-BULL = ("上涨", "走强", "偏强", "减产", "干旱", "短缺", "去库", "提振", "大涨", "供应紧张", "霜冻")
-BEAR = ("下跌", "走弱", "偏弱", "丰产", "增产", "到港", "累库", "供应宽松", "大跌", "抛储", "收割顺利")
-# Only mainstream financial media, official bodies, and futures-broker research
-# desks count as news. Anything else the search returns is dropped on the floor.
-NEWS_MEDIA = frozenset(
-    {
-        # mainstream financial press
-        "证券时报", "证券时报网", "财联社", "每日经济新闻", "界面新闻", "新华财经",
-        "第一财经", "期货日报", "期货日报网", "上海证券报", "上海证券报·中国证券网",
-        "21世纪经济报道", "证券日报", "证券日报之声", "经济日报", "中国新闻网",
-        "人民日报", "人民网", "人民财讯", "大河财立方", "中国证券报",
-        "中国证券报·中证金牛座", "中国证券报·中证网", "东方财富研究中心",
-        "东方财富Choice数据", "东方财富证券", "澎湃新闻", "经济参考报", "经济参考网",
-        "深圳商报·读创", "新华社", "新华网", "中国基金报", "华夏时报", "华夏时报网",
-        "中国经营报", "中国经营网", "南方财经网", "券商中国", "蓝鲸财经", "上观新闻",
-        "央广财经", "新京报", "国际金融报", "南方都市报", "中新经纬", "红星资本局",
-        "时代财经", "时代周报", "北京商报", "科创板日报", "中国网财经", "中宏网",
-        "广州日报", "大众网", "上游新闻", "湾财ND", "央视财经", "央视新闻",
-        "央视新闻客户端", "数据宝", "理财周刊-财事汇", "财中社", "中国财富通",
-        # official bodies
-        "农业农村部", "国家粮食和物资储备局", "海关总署", "商务部", "财政部",
-        "财政部网站", "大连商品交易所", "郑州商品交易所",
-        # futures-broker research desks
-        "广发期货", "五矿期货", "混沌天成期货", "国投期货", "上海中期期货",
-        "东吴期货", "中财期货", "正信期货", "南华期货", "中州期货",
-        "申银万国期货", "创元期货", "光大期货", "瑞达期货", "国信期货",
-    }
-)
-
-
-def _news_media_ok(name: str) -> bool:
-    return bool(name) and name in NEWS_MEDIA
+# The news-scrape sentiment pipeline was retired 2026-10-27. No production model
+# used 新闻倾向/新闻三日; the LLM poll at data/llm_poll is its successor.
+# The four public names below stay as empty stubs so old call sites keep running.
 
 
 def _get(url: str) -> str:
@@ -312,6 +285,29 @@ def fetch_overseas(symbol: str) -> list[dict]:
     return out
 
 
+DATA_FLOOR = "2016-10-01"
+
+
+def bar_ok(row: dict) -> bool:
+    """A domestic daily bar that can enter training.
+
+    Price-only series (CBOT, FCPO) have no volume field and stay. A bar is
+    dropped when volume or open interest is missing or zero, when high equals
+    low, or when the open or close sits outside the high-low range. Those are
+    holiday stubs and no-trade days, not limit locks with real turnover.
+    """
+
+    if "成交量" not in row and "持仓" not in row:
+        return True
+    open_, high, low, close = row.get("开盘"), row.get("最高"), row.get("最低"), row.get("收盘")
+    if None in (open_, high, low, close) or not close or not low:
+        return False
+    if high <= low or not (low <= open_ <= high and low <= close <= high):
+        return False
+    volume, oi = row.get("成交量"), row.get("持仓")
+    return bool(volume) and volume > 0 and bool(oi) and oi > 0
+
+
 def _cached_rows(path: Path) -> list[tuple[str, float]]:
     """Close series. Accepts the full daily bar and the older date/close pair."""
 
@@ -319,11 +315,15 @@ def _cached_rows(path: Path) -> list[tuple[str, float]]:
     out = []
     for item in raw:
         if isinstance(item, dict):
+            if not bar_ok(item):
+                continue
             day = item.get("日期") or item.get("d")
             close = item.get("收盘", item.get("c"))
-            out.append((str(day), float(close)))
+            if str(day) >= DATA_FLOOR:
+                out.append((str(day), float(close)))
             continue
-        out.append((str(item[0]), float(item[1])))
+        if str(item[0]) >= DATA_FLOOR:
+            out.append((str(item[0]), float(item[1])))
     return out
 
 
@@ -354,6 +354,18 @@ def load_series() -> dict[str, dict[str, float]]:
             continue
         path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
         series[key] = {item["日期"]: float(item["收盘"]) for item in rows}
+    for key, symbol in OVERSEAS_EXTRA.items():
+        path = series_path(key)
+        try:
+            rows = fetch_overseas(symbol)
+            if not rows:
+                raise RuntimeError("空行情")
+        except Exception as exc:
+            if not path.exists():
+                continue
+            print(f"{key} 行情拉取失败，用缓存 {exc}", flush=True)
+            continue
+        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     return series
 
 
@@ -366,6 +378,94 @@ def returns(closes: dict[str, float]) -> dict[str, float]:
     return out
 
 
+_ROLL_BASIS: dict[str, dict[str, dict]] = {}
+_CAL_DAYS: dict[str, list[str]] = {}
+
+
+def _calendar_days(key: str) -> list[str]:
+    if key not in _CAL_DAYS:
+        from ingest import roll_calendar
+
+        _CAL_DAYS[key] = sorted(roll_calendar.load_calendar(key))
+    return _CAL_DAYS[key]
+
+
+def roll_basis(key: str) -> dict[str, dict]:
+    """Own-contract previous session stamped on roll days in the main-minute file."""
+
+    if key in _ROLL_BASIS:
+        return _ROLL_BASIS[key]
+    found: dict[str, dict] = {}
+    path = MAIN_MINUTE / f"{key}.csv"
+    if path.exists():
+        with path.open() as handle:
+            for row in csv.DictReader(handle):
+                stamp, hm = row["trade_time"][:10], row["trade_time"][11:16]
+                if not ("09:00" <= hm <= "15:00") or stamp in found:
+                    continue
+                if not (row.get("昨收") and row.get("昨仓") and row.get("昨量")):
+                    continue
+                slot = {
+                    "昨收": float(row["昨收"]),
+                    "昨仓": float(row["昨仓"]),
+                    "昨量": float(row["昨量"]),
+                }
+                for name in ("当日收", "当日仓", "当日量"):
+                    slot[name] = float(row[name]) if row.get(name) else None
+                found[stamp] = slot
+    _ROLL_BASIS[key] = found
+    return found
+
+
+def _crosses_hole(key: str, prev: str, day: str) -> bool:
+    days = _calendar_days(key)
+    if not days:
+        return False
+    index = bisect_right(days, prev)
+    return index < len(days) and days[index] < day
+
+
+def session_returns(key: str, closes: dict[str, float]) -> dict[str, float]:
+    """Close-to-close returns. A roll day uses that contract's own previous close.
+
+    A missing trading day is not bridged. Noise bars never enter `closes`.
+    """
+
+    basis = roll_basis(key)
+    out = {}
+    ordered = sorted(closes)
+    for prev, day in zip(ordered, ordered[1:]):
+        if not closes[prev] or _crosses_hole(key, prev, day):
+            continue
+        slot = basis.get(day)
+        if slot and slot.get("昨收"):
+            now = slot.get("当日收") or closes[day]
+            out[day] = (now - slot["昨收"]) / slot["昨收"] * 100.0
+        else:
+            out[day] = (closes[day] - closes[prev]) / closes[prev] * 100.0
+    return out
+
+
+def session_swing(key: str, closes: dict[str, float]) -> dict[str, float]:
+    """Swing on a same-contract return index, so a roll gap never moves it."""
+
+    rets = session_returns(key, closes)
+    level = 100.0
+    levels = []
+    kept = []
+    for day in sorted(closes):
+        if day not in rets:
+            continue
+        level *= 1.0 + rets[day] / 100.0
+        levels.append(level)
+        kept.append(day)
+    return dict(zip(kept, swing_path(levels)))
+
+
+def _without_news(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(name for name in names if "新闻" not in name)
+
+
 COT_DAILY = ROOT / "training_dataset" / "cot"
 POSITION_DAILY = ROOT / "training_dataset" / "position"
 COT_MARKETS = (("S", "美豆", "SOYBEANS"), ("SM", "美豆粕", "SOYBEAN_MEAL"), ("BO", "美豆油", "SOYBEAN_OIL"))
@@ -373,7 +473,10 @@ COT_MARKETS = (("S", "美豆", "SOYBEANS"), ("SM", "美豆粕", "SOYBEAN_MEAL"),
 
 def _cached_bars(path: Path) -> list[dict]:
     raw = json.loads(path.read_text())
-    return [row for row in raw if isinstance(row, dict)]
+    return [
+        row for row in raw
+        if isinstance(row, dict) and bar_ok(row) and str(row.get("日期") or row.get("d") or "") >= DATA_FLOOR
+    ]
 
 
 def _extra_from(prev: dict | None, bar: dict) -> dict[str, float]:
@@ -436,6 +539,21 @@ def _minute_bar(key: str, day: str, night_of: str | None = None) -> dict | None:
 _BARS_CACHE: dict[str, list[dict]] = {}
 
 
+def _roll_extra(extra: dict[str, float], basis: dict | None, bar: dict) -> dict[str, float]:
+    """On a roll day, volume, open interest, and amplitude use the new contract."""
+
+    if not basis or not basis.get("昨收") or not basis.get("昨仓") or not basis.get("昨量"):
+        return extra
+    high, low = bar.get("最高"), bar.get("最低")
+    if high is not None and low is not None:
+        extra["振幅"] = (high - low) / basis["昨收"] * 100.0
+    if basis.get("当日量"):
+        extra["量变化"] = (basis["当日量"] / basis["昨量"] - 1.0) * 100.0
+    if basis.get("当日仓"):
+        extra["仓变化"] = (basis["当日仓"] / basis["昨仓"] - 1.0) * 100.0
+    return extra
+
+
 def extra_named(key: str, anchor: str) -> dict[str, float]:
     """The four daily extras at an anchor day.
 
@@ -448,15 +566,16 @@ def extra_named(key: str, anchor: str) -> dict[str, float]:
     if bars is None:
         bars = _cached_bars(series_path(key))
         _BARS_CACHE[key] = bars
+    basis = roll_basis(key).get(anchor)
     prev = None
     for bar in bars:
         if bar.get("日期") == anchor:
-            extra = _extra_from(prev, bar)
+            extra = _roll_extra(_extra_from(prev, bar), basis, bar)
             return {f"{NAMES[key]}{suffix}": value for suffix, value in extra.items()}
         prev = bar
     bar = _minute_bar(key, anchor, night_of=bars[-1]["日期"] if bars else None)
     if bar is not None and bars:
-        extra = _extra_from(bars[-1], bar)
+        extra = _roll_extra(_extra_from(bars[-1], bar), basis, bar)
         return {f"{NAMES[key]}{suffix}": value for suffix, value in extra.items()}
     return {f"{NAMES[key]}{suffix}": value for suffix, value in (("振幅", 0.0), ("位置", 0.5), ("量变化", 0.0), ("仓变化", 0.0))}
 
@@ -581,7 +700,7 @@ def _variant_names(base: tuple[str, ...], key: str, variant: str) -> tuple[str, 
 
 def sina_feature_names(key: str, family: str) -> tuple[str, ...]:
     base = {"A": FEATURE_NAMES, "M": FEATURE_NAMES, "RM": RM_FEATURES, "B": B_FEATURES, "Y": Y_FEATURES}[key]
-    return _variant_names(base, key, variant_for(key, family))
+    return _without_news(_variant_names(base, key, variant_for(key, family)))
 
 
 def swing_path(closes: list[float], rev: float = 0.03) -> list[float]:
@@ -630,8 +749,9 @@ def domestic_tape(
 
     tape = []
     for key in keys:
-        days = [item for item in sorted(series[key]) if day is None or item <= day]
-        tape.append(swing_path([series[key][item] for item in days])[-1] if days else 0.0)
+        swing = session_swing(key, series[key])
+        days = [item for item in sorted(swing) if day is None or item <= day]
+        tape.append(swing[days[-1]] if days else 0.0)
     return tape
 
 
@@ -646,178 +766,39 @@ def latest_on_or_before(days: list[str], day: str) -> str | None:
     return days[lo - 1] if lo else None
 
 
-def _score_blob(blob: str) -> float:
-    return sum(blob.count(w) for w in BULL) - sum(blob.count(w) for w in BEAR)
+def news_scores() -> dict[str, float]:
+    """Stub. The news pipeline is retired; see the note by MODELS."""
 
-
-def _news_load(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows = json.loads(path.read_text())
-    return rows if isinstance(rows, list) else []
-
-
-def _news_append(path: Path, rows: list[dict]) -> int:
-    """Append articles not yet in the day's file. Same code is stored once."""
-
-    kept = _news_load(path)
-    have = {str(row.get("code")) for row in kept}
-    added = 0
-    for row in rows:
-        if str(row.get("code")) in have:
-            continue
-        kept.append(row)
-        added += 1
-    if added:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(kept, ensure_ascii=False, indent=2))
-    return added
-
-
-def _news_day_files() -> list[Path]:
-    if not NEWS_DAILY.exists():
-        return []
-    return sorted(
-        path
-        for path in NEWS_DAILY.glob("*.json")
-        if path.name != "scores.json" and len(path.stem) == 10 and path.stem[4] == "-"
-    )
-
-
-def _news_rescore_files() -> dict[str, float]:
-    scores: dict[str, float] = {}
-    for path in _news_day_files():
-        total = 0.0
-        for row in _news_load(path):
-            blob = f"{row.get('title') or ''} {row.get('content') or ''}"
-            total += _score_blob(blob)
-        if total or path.stem not in scores:
-            scores[path.stem] = scores.get(path.stem, 0.0) + total
-    return scores
+    return {}
 
 
 def fetch_news() -> dict[str, float]:
-    """Pull Eastmoney articles into training_dataset/news/<day>.json, one record each.
+    """Stub. Nothing is scraped anymore."""
 
-    The day score is the same word count as before, now recomputed from the stored
-    articles so the text stays on disk.
-    """
-
-    NEWS_DAILY.mkdir(parents=True, exist_ok=True)
-    seen: set[str] = set()
-    for keyword in ("豆粕", "菜粕", "大豆", "美豆"):
-        page = 1
-        while page <= 40:
-            param = {
-                "uid": "",
-                "keyword": keyword,
-                "type": ["cmsArticleWebOld"],
-                "client": "web",
-                "clientType": "web",
-                "clientVersion": "curr",
-                "param": {
-                    "cmsArticleWebOld": {
-                        "searchScope": "default",
-                        "sort": "time",
-                        "pageIndex": page,
-                        "pageSize": 50,
-                        "preTag": "",
-                        "postTag": "",
-                    }
-                },
-            }
-            url = (
-                "https://search-api-web.eastmoney.com/search/jsonp?cb=cb&param="
-                + urllib.request.quote(json.dumps(param, ensure_ascii=False))
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://so.eastmoney.com/"})
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
-            body = json.loads(text[text.find("(") + 1 : text.rfind(")")])
-            rows = (body.get("result") or {}).get("cmsArticleWebOld") or []
-            if not rows:
-                break
-            batch: dict[str, list[dict]] = {}
-            for row in rows:
-                code = str(row.get("code") or "")
-                if not code or code in seen:
-                    continue
-                seen.add(code)
-                media = str(row.get("mediaName") or "")
-                if not _news_media_ok(media):
-                    continue
-                blob = f"{row.get('title') or ''} {row.get('content') or ''}"
-                if not any(word in blob for word in NEWS_WORDS):
-                    continue
-                day = str(row.get("date") or "")[:10]
-                if len(day) != 10:
-                    continue
-                batch.setdefault(day, []).append(
-                    {
-                        "code": code,
-                        "date": str(row.get("date") or ""),
-                        "title": str(row.get("title") or ""),
-                        "content": str(row.get("content") or ""),
-                        "media": media,
-                        "keyword": keyword,
-                        "score": _score_blob(blob),
-                    }
-                )
-            for day, items in batch.items():
-                _news_append(NEWS_DAILY / f"{day}.json", items)
-            if len(rows) < 50:
-                break
-            page += 1
-    scores = _news_rescore_files()
-    (NEWS_DAILY / "scores.json").write_text(json.dumps(scores, ensure_ascii=False, sort_keys=True, indent=2))
-    return scores
+    return {}
 
 
 def news_before(scores: dict[str, float], prev: str, day: str) -> float:
-    # Headlines from the previous session and the gap before today's open.
-    return sum(value for date, value in scores.items() if prev <= date < day)
+    """Stub. Always neutral."""
+
+    return 0.0
 
 
 def news_ema_as_of(series: dict[str, dict[str, float]], scores: dict[str, float], as_of: str) -> float:
-    """Three-day EMA of the news score, through the close on `as_of`.
+    """Stub. Always neutral."""
 
-    Days without a finished US session are skipped, the same way samples are.
-    """
-
-    common = sorted(set(series["A"]) & set(series["M"]) & set(series["RM"]))
-    overseas = {key: returns(series[key]) for key in OVERSEAS if key in series}
-    overseas_days = {key: sorted(overseas[key]) for key in overseas}
-    alpha = 2 / (3 + 1)
-    ema = 0.0
-    for prev, day in zip(common, common[1:]):
-        if prev > as_of:
-            break
-        if overseas and any(latest_on_or_before(overseas_days[key], prev) is None for key in OVERSEAS):
-            continue
-        end = day if day <= as_of else "9999-99-99"
-        ema = alpha * news_before(scores, prev, end) + (1 - alpha) * ema
-        if prev == as_of:
-            break
-    if common and common[-1] == as_of:
-        if not overseas or all(latest_on_or_before(overseas_days[key], as_of) is not None for key in OVERSEAS):
-            ema = alpha * news_before(scores, as_of, "9999-99-99") + (1 - alpha) * ema
-    return ema
+    return 0.0
 
 
 def samples(series: dict[str, dict[str, float]], news: dict[str, float] | None = None) -> list[dict]:
-    domestic = {key: returns(series[key]) for key in DOMESTIC if key in series}
+    domestic = {key: session_returns(key, series[key]) for key in DOMESTIC if key in series}
     overseas = {key: returns(series[key]) for key in OVERSEAS}
     overseas_days = {key: sorted(overseas[key]) for key in OVERSEAS}
-    swings = {
-        key: dict(zip(sorted(series[key]), swing_path([series[key][day] for day in sorted(series[key])])))
-        for key in domestic
-    }
+    swings = {key: session_swing(key, series[key]) for key in domestic}
     common = sorted(set(domestic["A"]) & set(domestic["M"]) & set(domestic["RM"]))
     cot = cot_series()
     seats = seat_series()
     rows = []
-    news_ema = 0.0
-    news_alpha = 2 / (3 + 1)
     for i in range(1, len(common)):
         day = common[i]
         prev = common[i - 1]
@@ -833,10 +814,6 @@ def samples(series: dict[str, dict[str, float]], news: dict[str, float] | None =
         named["豆一这段"] = swings["A"][prev]
         named["豆粕这段"] = swings["M"][prev]
         named["菜粕这段"] = swings["RM"][prev]
-        raw_news = news_before(news or {}, prev, day)
-        news_ema = news_alpha * raw_news + (1 - news_alpha) * news_ema
-        named["新闻倾向"] = raw_news
-        named["新闻三日"] = news_ema
         named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
         has_b = day in domestic.get("B", {}) and prev in domestic.get("B", {}) and prev in swings.get("B", {})
         has_y = day in domestic.get("Y", {}) and prev in domestic.get("Y", {}) and prev in swings.get("Y", {})
@@ -987,17 +964,6 @@ def evaluate(key: str, train: list[dict], test: list[dict]) -> dict:
         "mean": mean,
         "scale": scale,
     }
-
-
-def news_scores() -> dict[str, float]:
-    """Day scores from the stored articles. data/news.json is read only as a fallback."""
-
-    if _news_day_files():
-        return _news_rescore_files()
-    path = DATA / "news.json"
-    if not path.exists():
-        return {}
-    return {str(k): float(v) for k, v in json.loads(path.read_text()).items()}
 
 
 def direction(prob: float) -> str:
@@ -1181,7 +1147,7 @@ def _day_after(day: str) -> str:
 
 
 def outlook(series: dict[str, dict[str, float]], models: dict[str, dict]) -> dict:
-    domestic = {key: returns(series[key]) for key in DOMESTIC if key in series}
+    domestic = {key: session_returns(key, series[key]) for key in DOMESTIC if key in series}
     last = session_day(series)
     named = {
         "豆一昨涨跌": domestic["A"][last],
@@ -1203,8 +1169,6 @@ def outlook(series: dict[str, dict[str, float]], models: dict[str, dict]) -> dic
     if "Y" in domestic and last in domestic["Y"]:
         named["豆油昨涨跌"] = domestic["Y"][last]
         named["豆油这段"] = domestic_tape(series, last, keys=("Y",))[0]
-    named["新闻倾向"] = news_before(news_scores(), last, "9999-99-99")
-    named["新闻三日"] = news_ema_as_of(series, news_scores(), last)
     named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
     for key in DOMESTIC:
         named.update(extra_named(key, last))
@@ -1252,44 +1216,14 @@ def main() -> int:
             + " ".join(f"{NAMES[key]}{series[key][today]:.0f}" for key in DOMESTIC),
             flush=True,
         )
-    news = fetch_news()
-    news_days = sorted(news)
-    print(
-        f"新闻 {len(news)} 天有条目  {news_days[0] if news_days else '无'} → {news_days[-1] if news_days else '无'}"
-    )
-    rows = [row for row in samples(series, news) if row["day"] >= "2017-01-01"]
+    rows = [row for row in samples(series) if row["day"] >= "2017-01-01"]
     year_start = f"{int(rows[-1]['day'][:4]) - 1}{rows[-1]['day'][4:]}"
     train = [row for row in rows if row["day"] < year_start]
     test = [row for row in rows if row["day"] >= year_start]
     if len(train) < 200 or len(test) < 50:
         raise SystemExit(f"样本不够 train={len(train)} test={len(test)}")
-    price_train = [{**row, "x": row["x"][:-1]} for row in train]
-    price_test = [{**row, "x": row["x"][:-1]} for row in test]
     print(f"过去一年 {test[0]['day']} → {test[-1]['day']}  训练只用更早的 {len(train)} 天")
-    _print_block("只看行情", price_train, price_test)
-    news_rows = [row for row in rows if row["x"][-1] != 0]
-    if len(news_rows) >= 30:
-        walked = []
-        months = sorted({row["day"][:7] for row in news_rows})
-        for month in months:
-            prior = [row for row in rows if row["day"] < f"{month}-01"]
-            month_rows = [row for row in news_rows if row["day"].startswith(month)]
-            if len(prior) < 200 or not month_rows:
-                continue
-            for key in CONTRACTS:
-                usable = [row for row in prior if _vector(row, key) is not None and key in row["y"]]
-                month_ok = [row for row in month_rows if _vector(row, key) is not None and key in row["y"]]
-                if len(usable) < 200 or not month_ok:
-                    continue
-                result = evaluate(key, prior, month_rows)
-                walked.append((key, result["order_accuracy"], result["order_n"]))
-        print(f"新闻按月往前推（报道从 {news_rows[0]['day']} 起，当月不用当月的新闻拟合）")
-        print(f"{'品种':<6}{'下单命中':>10}{'下单天数':>8}")
-        for key in CONTRACTS:
-            picked = [item for item in walked if item[0] == key and item[2]]
-            total = sum(item[2] for item in picked)
-            hits = sum(item[1] * item[2] for item in picked)
-            print(f"{NAMES[key]:<6}{(hits / total if total else 0)*100:9.1f}%{total:8d}")
+    _print_block("不含新闻", train, test)
     trained_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     models = {}
 

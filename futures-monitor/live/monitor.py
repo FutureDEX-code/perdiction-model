@@ -33,10 +33,7 @@ from core.train import (
     direction,
     domestic_tape,
     load_models,
-    news_before,
-    news_ema_as_of,
     _cached_rows,
-    news_scores,
     series_path,
     views_from_features,
 )
@@ -394,8 +391,6 @@ def model_night(domestic: list[Quote], overseas: list[Quote]) -> tuple[list[Bias
         path = series_path(key)
         if path.exists():
             closes[key] = {day: close for day, close in _cached_rows(path) if close}
-    if {"A", "M", "RM"} <= set(closes):
-        named["新闻三日"] = news_ema_as_of(closes, news_scores(), today.isoformat())
     named["菜粕价差波段"] = tape[2] - tape[1]
     try:
         models = load_models()

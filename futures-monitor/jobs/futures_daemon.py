@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the futures board up. Data refreshes in the afternoon. Models train at 20:30.
+"""Keep the futures board up. Data refreshes in the afternoon. 20:30 predicts again without refitting.
 
 Start with: python3 futures_daemon.py --daemon
 The process detaches from the terminal. It does not place orders.
@@ -53,7 +53,7 @@ def ensure_board() -> None:
 
 def train_if_due() -> None:
     now = datetime.now(TZ)
-    # 下午只补数据并给出方向。20 个模型留到 20:30 训练。
+    # 下午只补数据并给出方向。20:30 用已有模型再预测，不重训。
     if (now.hour, now.minute) < (14, 50):
         return
     today = now.date().isoformat()
@@ -206,6 +206,20 @@ def halfmonth_if_due() -> None:
         mark.write_text(today)
 
 
+def gainmoney_mail_if_due() -> None:
+    """The 20:35 mail for the eight new models. Sent once a day."""
+
+    now = datetime.now(TZ)
+    if (now.hour, now.minute) < (20, 35):
+        return
+    today = now.date().isoformat()
+    sent = ROOT / "data" / "gainmoney_new_models_emailed.txt"
+    if sent.exists() and sent.read_text().strip() == today:
+        return
+    result = subprocess.run([_venv(), "-u", "-m", "gainmoney.mail_new_models"], cwd=ROOT, capture_output=True, text=True)
+    print((result.stdout or result.stderr).strip(), flush=True)
+
+
 def mail_if_due() -> None:
     """Retry the single 14:50 mail. The 20:30 mail is separate. Never the company mailbox."""
 
@@ -265,6 +279,7 @@ def serve() -> None:
             halfmonth_if_due()
             session_tape_if_due()
             mail_if_due()
+            gainmoney_mail_if_due()
             tape_mail_if_due()
         except Exception as exc:
             print(f"daemon error {exc}", flush=True)

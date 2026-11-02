@@ -3,7 +3,7 @@
 
 At 20:30 on day D, yesterday's 14:50 combo call is graded against the
 14:55-to-14:55 move. Wrong calls and missed big moves get the full environment
-recorded: US bars, news score and headlines, fund and seat positions, and the
+recorded: US bars, fund and seat positions, and the
 model votes. On the 1st and 16th, the last half month's records and the
 half-hour grades roll up into one review mail.
 """
@@ -28,15 +28,6 @@ REVIEW = ROOT / "data" / "review"
 DAILY = REVIEW / "daily.jsonl"
 HH_GRADES = ROOT / "data" / "tape_hour_grades.jsonl"
 BIG_MOVE = 1.0  # % — a move this size with 没有方向 counts as a miss worth reviewing
-
-
-def _headlines(day: str, limit: int = 4) -> list[str]:
-    path = train.NEWS_DAILY / f"{day}.json"
-    if not path.exists():
-        return []
-    rows = json.loads(path.read_text())
-    rows = sorted(rows, key=lambda row: -abs(row.get("score") or 0))
-    return [f"[{row['score']:+d}]{row['media']} {row['title'][:40]}" for row in rows[:limit]]
 
 
 def _position_state(product: str) -> dict | None:
@@ -138,7 +129,6 @@ def grade_yesterday() -> list[dict]:
                 "us": {name: f"{slot['close']} {slot['pct']:+.2f}%" for name, slot in us.items()},
                 "news": inputs.get("news"),
                 "news_ema": inputs.get("news_ema"),
-                "headlines": _headlines(signal_day),
                 "cot": _cot_state(),
                 "seat": _position_state(key) if key == "RM" else None,
             },
@@ -219,9 +209,6 @@ def half_month_body(today: str) -> str:
             us = env.get("us") or {}
             if us:
                 lines.append("  美盘 " + " ".join(f"{name}{slot}" for name, slot in us.items()))
-            lines.append(f"  新闻倾向 {env.get('news')} 三日 {env.get('news_ema')}")
-            for head in (env.get("headlines") or [])[:2]:
-                lines.append(f"  新闻 {head}")
             votes = row.get("models") or {}
             split = " ".join(f"{fam}{view.get('lean')}" for fam, view in votes.items() if view.get("lean"))
             if split:

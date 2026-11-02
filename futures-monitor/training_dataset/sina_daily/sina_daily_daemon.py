@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Pull the five Sina daily closes. Nothing else.
+"""Pull the eight Sina daily closes (five traded + 棕榈油/菜籽油/花生). Nothing else.
 
 From 18:00, retry until today's 15:00 bar is in. One failure mail per day
 if it is still missing at 18:20. The subject is fixed. The 14:50 mail does
-not wait for this bar; the 20:30 training is the consumer.
+not wait for this bar; the 20:30 prediction reads it.
 """
 
 from __future__ import annotations
@@ -37,31 +37,54 @@ def _marked(path: Path, today: str) -> bool:
     return path.exists() and path.read_text().strip() == today
 
 
-def pull() -> tuple[bool, str]:
-    """Write the five domestic files. True only when every one ends on today."""
+def pull() -> tuple[bool, str, dict]:
+    """Write the domestic files. True only when every one ends on today."""
 
     today = datetime.now(TZ).date().isoformat()
     problems = []
+    fresh: dict[str, list[dict]] = {}
     train.DATA.mkdir(parents=True, exist_ok=True)
-    for key, symbol in train.DOMESTIC.items():
+    for key, symbol in (*train.DOMESTIC.items(), *train.SINA_EXTRA.items()):
+        name = train.NAMES.get(key) or train.EXTRA_NAMES.get(key, key)
         path = train.series_path(key)
         try:
             rows = train.fetch_domestic(symbol)
+            rows = [row for row in rows if str(row.get("日期") or "") >= train.DATA_FLOOR]
             if not rows:
                 raise RuntimeError("空行情")
         except Exception as exc:
-            problems.append(f"{train.NAMES[key]} 拉取失败 {exc}")
+            problems.append(f"{name} 拉取失败 {exc}")
             continue
         path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
+        fresh[key] = rows
         last = str(rows[-1]["日期"])
         close = float(rows[-1]["收盘"])
         if last != today:
-            problems.append(f"{train.NAMES[key]} 最后一根是 {last} {close:.0f}")
+            problems.append(f"{name} 最后一根是 {last} {close:.0f}")
             continue
-        print(f"{train.NAMES[key]} {last} {close:.0f}", flush=True)
+        print(f"{name} {last} {close:.0f}", flush=True)
     if problems:
-        return False, "\n".join(problems)
-    return True, "五个品种今天的15:00收盘都到了"
+        return False, "\n".join(problems), fresh
+    return True, "八个品种今天的15:00收盘都到了", fresh
+
+
+def _update_roll_calendar(fresh: dict) -> None:
+    """Append today to the roll calendar; a confirmed roll for a traded product
+    also reconciles the CTP subscription before the night session."""
+
+    from ingest import roll_calendar
+    from training_dataset.main_minute.main_minute_daemon import _ensure_subscribed, drop_foreign_day_bars
+
+    def hook(product: str, _old: str, new: str) -> None:
+        _ensure_subscribed(product, new)
+
+    rolls = roll_calendar.update_today(fresh, traded_hook=hook)
+    for product in roll_calendar.PRODUCTS:
+        drop_foreign_day_bars(product)
+    from ingest.roll_reference import apply
+
+    for product in {item[0] for item in rolls}:
+        apply(product)
 
 
 def _mail(body: str) -> None:
@@ -89,10 +112,14 @@ def serve() -> None:
             now = datetime.now(TZ)
             today = _today(now)
             if now.weekday() < 5 and (now.hour, now.minute) >= (18, 0) and not _marked(GOT, today):
-                ok, detail = pull()
+                ok, detail, fresh = pull()
                 if ok:
                     GOT.write_text(today + "\n")
                     print(detail, flush=True)
+                    try:
+                        _update_roll_calendar(fresh)
+                    except Exception as exc:
+                        print(f"换月日历续期失败 {exc}", flush=True)
                 else:
                     print(detail, flush=True)
                     if (now.hour, now.minute) >= (18, 20) and not _marked(MAILED, today):

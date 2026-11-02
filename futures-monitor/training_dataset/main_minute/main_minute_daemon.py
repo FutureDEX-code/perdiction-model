@@ -11,6 +11,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -31,7 +33,7 @@ GAP_START = "2026-10-21 21:00:00"
 GAP_END = "2026-10-22 13:29:00"
 MAIN = ROOT / "training_dataset" / "main_minute"
 LIVE = "http://127.0.0.1:8771/latest"
-EXTRAS = ("bid", "ask", "bid_vol", "ask_vol", "pre_close", "pre_settle")
+EXTRAS = ("bid", "ask", "bid_vol", "ask_vol", "pre_close", "pre_settle", "昨收", "昨仓", "昨量", "当日收", "当日仓", "当日量")
 HEADER = ["trade_time", "open", "high", "low", "close", "vol", "amount", "oi", "contract", *EXTRAS]
 SESSIONS = ((9 * 60, 10 * 60 + 15), (10 * 60 + 30, 11 * 60 + 30), (13 * 60 + 30, 15 * 60), (21 * 60, 23 * 60))
 def _minutes(now: datetime) -> int:
@@ -42,13 +44,54 @@ def _in_session(minutes: int) -> bool:
     return any(start <= minutes < end for start, end in SESSIONS)
 
 
+def _keep_clock(product: str, hm: str) -> bool:
+    """Trading minutes only. The closing minute of each session stays.
+
+    Quotes before the open, across the breaks, and between 15:01 and 20:59
+    are not minutes. Peanut has no night session. History through 23:30 is
+    left in the files; new writes stop at 23:00.
+    """
+
+    if "09:00" <= hm <= "10:15" or "10:30" <= hm <= "11:30" or "13:30" <= hm <= "15:00":
+        return True
+    return product != "PK" and "21:00" <= hm <= "23:00"
+
+
+_CALENDAR: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _calendar(product: str) -> dict[str, str]:
+    path = ROOT / "training_dataset" / "roll_calendar" / f"{product}.json"
+    mtime = path.stat().st_mtime if path.exists() else 0.0
+    cached = _CALENDAR.get(product)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    book = json.loads(path.read_text()) if path.exists() else {}
+    _CALENDAR[product] = (mtime, book)
+    return book
+
+
+def _foreign_day(product: str, trade_time: str, contract: str) -> bool:
+    """A day-session bar whose contract is not the main already on the calendar."""
+
+    if len(trade_time) < 16 or not contract:
+        return False
+    hm = trade_time[11:16]
+    if not ("09:00" <= hm <= "15:00"):
+        return False
+    official = _calendar(product).get(trade_time[:10])
+    return bool(official and official != contract)
+
+
 def _contract_name(code: str) -> str:
     text = code.lower()
-    if text.startswith("rm"):
-        digits = text[2:]
-        if len(digits) == 3:
-            return "RM2" + digits
-        return "RM" + digits
+    for prefix in ("rm", "oi", "pk"):
+        if text.startswith(prefix):
+            digits = text[len(prefix) :]
+            upper = prefix.upper()
+            if len(digits) == 3:
+                return upper + "2" + digits
+            return upper + digits
     return text.upper()
 
 
@@ -83,6 +126,59 @@ def _ask_live() -> dict:
 
 
 _mains_cache: tuple[str, dict[str, str], set[str]] | None = None
+
+SIMNOW_MD = ROOT / "live" / "simnow_md.py"
+# Half-hour tape keeps the 2701 contracts of the five traded products. Only the
+# main-contract slot rolls; the three new products have no tape slot.
+TAPE_INSTRUMENT = {"A": "a2701", "B": "b2701", "M": "m2701", "Y": "y2701", "RM": "RM701"}
+ZCE = ("RM", "OI", "PK")
+PRODUCTS_ALL = ("A", "B", "M", "Y", "RM", "P", "OI", "PK")
+
+
+def _instrument_for(product: str, contract: str) -> str:
+    if product in ZCE:
+        # CTP Zhengzhou ids drop the decade digit: OI2701 -> OI701, PK2701 -> PK701.
+        return product + contract[len(product) + 1 :]
+    return contract.lower()
+
+
+def _feed_name(item: str) -> str:
+    low = item.lower()
+    zce_names = {"rm": "菜粕", "oi": "菜籽油", "pk": "花生"}
+    for prefix, name in zce_names.items():
+        if low.startswith(prefix):
+            digits = low[len(prefix) :]
+            full = digits if len(digits) == 4 else "2" + digits
+            return f"{name}{full}"
+    names = {"a": "豆一", "b": "豆二", "m": "豆粕", "y": "豆油", "p": "棕榈油"}
+    return f"{names[low[0]]}{low[1:]}"
+
+
+def _ensure_subscribed(product: str, contract: str) -> None:
+    """A Sina main that is not in the CTP feed means no minutes. Subscribe it and let launchd restart the feed."""
+
+    instrument = _instrument_for(product, contract)
+    text = SIMNOW_MD.read_text()
+    if f'"{instrument}"' in text:
+        return
+    match = re.search(r"INSTRUMENTS = \(([^)]*)\)", text)
+    names_match = re.search(r"NAMES = \{([^}]*)\}", text)
+    if not match or not names_match:
+        print(f"{product} 新浪主力是 {contract}，行情文件没认出来，不敢自动订阅", flush=True)
+        return
+    current = [item.strip().strip('"') for item in match.group(1).split(",") if item.strip()]
+    prefix = product if product in ZCE else product.lower()
+    tape = TAPE_INSTRUMENT.get(product)
+    kept = [item for item in current if not (item.startswith(prefix) and item != tape)]
+    kept.append(instrument)
+    instruments_line = "INSTRUMENTS = (" + ", ".join(f'"{item}"' for item in kept) + ")"
+    names_new = "NAMES = {\n" + "\n".join(f'    "{item.lower()}": "{_feed_name(item)}",' for item in kept) + "\n}"
+    text = text[: match.start()] + instruments_line + text[match.end() :]
+    names_match = re.search(r"NAMES = \{([^}]*)\}", text)
+    text = text[: names_match.start()] + names_new + text[names_match.end() :]
+    SIMNOW_MD.write_text(text)
+    print(f"{product} 新浪主力换成 {contract}，订阅 {instrument} 并重启行情进程", flush=True)
+    subprocess.run(["pkill", "-f", "live.simnow_md"], check=False)
 
 
 def _session_key(now: datetime) -> str:
@@ -121,9 +217,14 @@ def _mains_for(now: datetime) -> dict[str, str]:
     if _mains_cache is not None and _mains_cache[0] == key and not _session_opening(now):
         return _mains_cache[1]
     found = pull_main_minutes.current_mains()
+    for product, contract in found.items():
+        try:
+            _ensure_subscribed(product, contract)
+        except Exception as exc:
+            print(f"自动订阅 {product} {contract} 失败 {exc}", flush=True)
     mapping: dict[str, str] = {}
     unresolved: set[str] = set()
-    for product in ("A", "B", "M", "Y", "RM"):
+    for product in PRODUCTS_ALL:
         contract = found.get(product) or ""
         if contract:
             mapping[contract] = product
@@ -141,6 +242,19 @@ def _mains_for(now: datetime) -> dict[str, str]:
     if mapping:
         print("这一节的主力 " + " ".join(f"{product} {contract}" for contract, product in mapping.items()), flush=True)
     return mapping
+
+
+def _roll_basis(product: str, trade_time: str, contract: str) -> tuple[str, str, str, str, str, str]:
+    """Same six columns as the 18:00 stamp, for a bar that arrives after it."""
+
+    try:
+        from ingest import roll_reference
+
+        got = roll_reference.for_bar(product, trade_time, contract)
+    except Exception as exc:
+        print(f"{product} 换月盖章没写上 {exc}", flush=True)
+        return ("", "", "", "", "", "")
+    return got or ("", "", "", "", "", "")
 
 
 def _append_live(now: datetime) -> None:
@@ -165,6 +279,12 @@ def _append_live(now: datetime) -> None:
             stamp = str(bar.get("trade_time") or "")
             if not stamp or stamp <= last or bar.get("close") in (None, 0):
                 continue
+            if len(stamp) < 16 or not _keep_clock(product, stamp[11:16]):
+                continue
+            if _foreign_day(product, stamp, contract):
+                print(f"{product} {contract} 跳过 {stamp}，日历当天是 {_calendar(product).get(stamp[:10])}", flush=True)
+                continue
+            basis = _roll_basis(product, stamp, contract)
             rows.append((
                 stamp,
                 bar.get("open"),
@@ -181,6 +301,7 @@ def _append_live(now: datetime) -> None:
                 bar.get("ask_vol") if bar.get("ask_vol") is not None else "",
                 bar.get("pre_close") if bar.get("pre_close") is not None else "",
                 bar.get("pre_settle") if bar.get("pre_settle") is not None else "",
+                *basis,
             ))
             last = stamp
         if not rows:
@@ -286,11 +407,11 @@ def _backfill_due(now: datetime) -> tuple[str, str, str] | None:
     today = now.date().isoformat()
     if (now.hour, now.minute) >= (15, 10):
         key = f"{today} day"
-        if any(f"{key} {product}" not in done for product in ("A", "B", "M", "Y", "RM")):
+        if any(f"{key} {product}" not in done for product in PRODUCTS_ALL):
             return key, f"{today} 09:00:00", f"{today} 15:00:00"
     if (now.hour, now.minute) >= (23, 5):
         key = f"{today} night"
-        if any(f"{key} {product}" not in done for product in ("A", "B", "M", "Y", "RM")):
+        if any(f"{key} {product}" not in done for product in PRODUCTS_ALL):
             return key, f"{today} 21:00:00", f"{today} 23:00:00"
     return None
 
@@ -355,13 +476,64 @@ def _gap_once() -> bool:
     return bean_two
 
 
+def drop_foreign_day_bars(product: str) -> int:
+    """Drop day-session minutes that belong to another contract than that day's main."""
+
+    path = MAIN / f"{product}.csv"
+    if not path.exists():
+        return 0
+    dropped = 0
+    temporary = path.with_suffix(".csv.tmp")
+    with path.open() as src, temporary.open("w", newline="") as dst:
+        reader = csv.DictReader(src)
+        writer = csv.DictWriter(dst, fieldnames=list(reader.fieldnames or []), extrasaction="ignore", restval="")
+        writer.writeheader()
+        for row in reader:
+            stamp = row.get("trade_time") or ""
+            if _foreign_day(product, stamp, row.get("contract") or ""):
+                dropped += 1
+                continue
+            writer.writerow(row)
+    if dropped == 0:
+        temporary.unlink()
+        return 0
+    temporary.replace(path)
+    print(f"{product} 去掉日历之外的日盘分钟 {dropped} 根", flush=True)
+    return dropped
+
+
+def _strip_quotes(path: Path, product: str) -> int:
+    """Remove stored quotes that are outside a trading minute. Night history past 23:00 stays."""
+
+    removed = 0
+    temporary = path.with_suffix(".csv.tmp")
+    with path.open() as src, temporary.open("w", newline="") as dst:
+        reader = csv.DictReader(src)
+        writer = csv.DictWriter(dst, fieldnames=list(reader.fieldnames or []), extrasaction="ignore", restval="")
+        writer.writeheader()
+        for row in reader:
+            stamp = row.get("trade_time") or ""
+            hm = stamp[11:16] if len(stamp) >= 16 else ""
+            if hm and not _keep_clock(product, hm) and not (product != "PK" and "23:00" < hm <= "23:30"):
+                removed += 1
+                continue
+            writer.writerow(row)
+    if removed == 0:
+        temporary.unlink()
+        return 0
+    temporary.replace(path)
+    print(f"{product} 去掉盘外报价 {removed} 根", flush=True)
+    return removed
+
+
 def serve() -> None:
     print(f"main minute daemon {os.getpid()} started", flush=True)
-    for product in ("A", "B", "M", "Y", "RM"):
+    for product in PRODUCTS_ALL:
         path = MAIN / f"{product}.csv"
         if path.exists():
             _ensure_columns(path)
     seen_minute = ""
+    flushed = ""
     while True:
         try:
             now = datetime.now(TZ)
@@ -369,6 +541,14 @@ def serve() -> None:
             previous = _minutes(now) - 1
             if now.second >= 2 and minute != seen_minute and _in_session(previous):
                 seen_minute = minute
+                _append_live(now)
+            # 14:59 and 15:00 finish after the day window closes. Write them
+            # before the 18:00 roll stamp, and drop any quote sitting in between.
+            post = ""
+            if (now.hour, now.minute) in ((15, 6), (23, 6)):
+                post = minute
+            if now.second >= 2 and post and post != flushed:
+                flushed = post
                 _append_live(now)
             if now.minute % 10 == 0 and now.second < 5 and not (GAP_ONCE.exists() and GAP_ONCE.read_text().strip() == "done"):
                 print(f"补一次切换空档 {GAP_START} → {GAP_END}", flush=True)

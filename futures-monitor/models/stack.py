@@ -217,7 +217,7 @@ def build(product: str, until: str | None = None):
 
     series = train.load_series()
     news = train.news_scores()
-    common = sorted(set(train.returns(series["A"])) & set(train.returns(series["M"])) & set(train.returns(series["RM"])))
+    common = sorted(set(train.session_returns("A", series["A"])) & set(train.session_returns("M", series["M"])) & set(train.session_returns("RM", series["RM"])))
     prev_of = {day: common[i - 1] for i, day in enumerate(common) if i > 0}
     sina_rows = [row for row in train.samples(series, news) if row["day"] >= "2017-01-01"]
     days = {p: minute.load_days(p) for p in ("A", "M", "RM")}

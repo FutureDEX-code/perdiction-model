@@ -31,6 +31,9 @@ PRODUCTS = (
     ("M", "DCE"),
     ("Y", "DCE"),
     ("RM", "ZCE"),
+    ("P", "DCE"),
+    ("OI", "ZCE"),
+    ("PK", "ZCE"),
 )
 KEEP_FROM = "2016-10-01"
 FIELDS = ("trade_time", "open", "high", "low", "close", "vol", "amount", "oi")
@@ -127,8 +130,10 @@ def download_one(token: str, product: str, ts_code: str, expiry: date) -> int:
     day = start
     while day <= stop:
         chunk_end = min(day + timedelta(days=9), stop)
-        start_text = f"{day.isoformat()} 21:00:00"
-        end_text = f"{chunk_end.isoformat()} 15:00:00"
+        # Contiguous windows: the next chunk starts the day after this one ends,
+        # so no day session can fall between chunks.
+        start_text = f"{day.isoformat()} 00:00:00"
+        end_text = f"{chunk_end.isoformat()} 23:59:00"
         for item in fetch(token, ts_code, start_text, end_text):
             record = dict(zip(
                 ("ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount", "oi"),

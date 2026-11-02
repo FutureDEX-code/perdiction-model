@@ -65,7 +65,7 @@ def _series() -> dict[str, dict[str, float]]:
 
 
 def _named(series: dict[str, dict[str, float]]) -> dict[str, float]:
-    domestic = {key: train.returns(series[key]) for key in train.DOMESTIC if key in series}
+    domestic = {key: train.session_returns(key, series[key]) for key in train.DOMESTIC if key in series}
     last = train.session_day(series)
     named = {
         "豆一昨涨跌": domestic["A"][last],
@@ -84,9 +84,6 @@ def _named(series: dict[str, dict[str, float]]) -> dict[str, float]:
     if "Y" in domestic and last in domestic["Y"]:
         named["豆油昨涨跌"] = domestic["Y"][last]
         named["豆油这段"] = train.domestic_tape(series, last, keys=("Y",))[0]
-    news = train.news_scores()
-    named["新闻倾向"] = train.news_before(news, last, "9999-99-99")
-    named["新闻三日"] = train.news_ema_as_of(series, news, last)
     named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
     for key in train.DOMESTIC:
         named.update(train.extra_named(key, last))
@@ -96,7 +93,7 @@ def _named(series: dict[str, dict[str, float]]) -> dict[str, float]:
 
 
 def _fit_views(series: dict[str, dict[str, float]], named: dict[str, float]) -> list[dict]:
-    rows = [row for row in train.samples(series, train.news_scores()) if row["day"] >= "2017-01-01"]
+    rows = [row for row in train.samples(series) if row["day"] >= "2017-01-01"]
     views = []
     OUT.mkdir(parents=True, exist_ok=True)
     for key in train.CONTRACTS:

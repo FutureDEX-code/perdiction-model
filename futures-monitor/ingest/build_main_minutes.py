@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Stitch each product's minute bars into one main-contract series.
+"""SUPERSEDED 2026-10-27. Do not run this against training_dataset/main_minute.
 
-Dalian's rule: after the close, the main is the largest open interest, then
-the larger volume, then the farther month. A new main is used from the next
-session, and only if its expiry is farther. Rapeseed meal has no published
-continuous-contract scheme, so it uses the same rule. Prices are not adjusted.
+The rule-based roll (schedule / schedule_sina, "East Money rule") was retired.
+Main-continuous files are now stitched from the true roll calendar by
+ingest/stitch_from_calendar.py, reading training_dataset/roll_calendar/*.json.
+Running this file's main()/main_sina() would overwrite those stitches.
+
+The functions stay for reference only. Everything below is frozen history.
 """
 
 from __future__ import annotations
@@ -292,7 +294,7 @@ def main_sina() -> None:
 if __name__ == "__main__":
     import sys
 
-    if "--sina" in sys.argv:
-        main_sina()
-    else:
-        main()
+    raise SystemExit(
+        "这个脚本已被 stitch_from_calendar.py 取代（2026-10-27）。"
+        "再跑它会用旧规则覆盖按真值日历拼好的主连文件。"
+    )

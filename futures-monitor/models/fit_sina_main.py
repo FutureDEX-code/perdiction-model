@@ -79,6 +79,8 @@ def load_days(product: str) -> dict[str, dict]:
                 float(row["vol"] or 0),
                 float(row["oi"] or 0),
                 row["contract"],
+                float(row["high"] or row["close"]),
+                float(row["low"] or row["close"]),
             )
             if clock >= "21:00":
                 nights.setdefault(date, []).append(bar)
@@ -119,6 +121,10 @@ def load_days(product: str) -> dict[str, dict]:
             night_ret = (traded_night[-1][2] - traded_night[0][1]) / traded_night[0][1] * 100.0
         day_ret = (close[2] - day_bars[0][1]) / day_bars[0][1] * 100.0 if day_bars[0][1] else 0.0
         vol = sum(bar[3] for bar in night) + sum(bar[3] for bar in day_bars if bar[0] <= close[0])
+        span_hi = max(bar[6] for bar in day_bars)
+        span_lo = min(bar[7] for bar in day_bars)
+        if vol <= 0 or not close[4] or span_hi <= span_lo:
+            continue
         out[date] = {
             "close": close[2],
             "entry": entry[2],
@@ -130,7 +136,19 @@ def load_days(product: str) -> dict[str, dict]:
             "contract": close[5],
         }
     dates = sorted(out)
+    basis = train.roll_basis(product)
+    calendar = train._calendar_days(product)
     for prev, date in zip(dates, dates[1:]):
+        slot = basis.get(date)
+        if slot and slot.get("昨仓") and slot.get("当日仓") and slot.get("昨量") and slot.get("当日量"):
+            out[date]["oi_chg"] = (slot["当日仓"] / slot["昨仓"] - 1.0) * 100.0
+            out[date]["vol_chg"] = (slot["当日量"] / slot["昨量"] - 1.0) * 100.0
+            continue
+        index = bisect_right(calendar, prev) if calendar else 0
+        if calendar and index < len(calendar) and calendar[index] < date:
+            out[date]["oi_chg"] = None
+            out[date]["vol_chg"] = None
+            continue
         out[date]["oi_chg"] = (out[date]["oi"] - out[prev]["oi"]) / out[prev]["oi"] * 100.0 if out[prev]["oi"] else 0.0
         out[date]["vol_chg"] = (out[date]["vol"] - out[prev]["vol"]) / out[prev]["vol"] * 100.0 if out[prev]["vol"] else 0.0
     if dates:
@@ -150,31 +168,24 @@ def extra_names(key: str) -> tuple[str, ...]:
 def minute_names(key: str, family: str) -> tuple[str, ...]:
     """Base minute columns plus the side dish the holdout picked for this product."""
 
-    return train._variant_names(names_for(key, True), key, train.variant_for(key, family))
+    return train._without_news(train._variant_names(names_for(key, True), key, train.variant_for(key, family)))
 
 
 def build_rows(days: dict[str, dict], overseas: dict, news: dict) -> list[dict]:
     closes = {key: {day: slot["close"] for day, slot in book.items()} for key, book in days.items()}
-    domestic = {key: train.returns(closes[key]) for key in days}
-    swings = {
-        key: dict(zip(sorted(closes[key]), train.swing_path([closes[key][day] for day in sorted(closes[key])])))
-        for key in days
-    }
+    domestic = {key: train.session_returns(key, closes[key]) for key in days}
+    swings = {key: train.session_swing(key, closes[key]) for key in days}
     common = sorted(set(swings["A"]) & set(swings["M"]) & set(swings["RM"]))
     common = [day for day in common if day >= "2017-01-01"]
     overseas_days = {key: sorted(overseas[key]) for key in train.OVERSEAS}
     cot = train.cot_series()
     seats = train.seat_series()
-    alpha = 2 / (3 + 1)
-    ema = 0.0
     rows = []
     for prev, day in zip(common, common[1:]):
         if any(train.latest_on_or_before(overseas_days[key], prev) is None for key in train.OVERSEAS):
             continue
         if any(prev not in domestic[key] or prev not in swings[key] for key in ("A", "M", "RM")):
             continue
-        raw_news = train.news_before(news, prev, day)
-        ema = alpha * raw_news + (1 - alpha) * ema
         named = {
             "豆一昨涨跌": domestic["A"][prev],
             "豆粕昨涨跌": domestic["M"][prev],
@@ -185,8 +196,6 @@ def build_rows(days: dict[str, dict], overseas: dict, news: dict) -> list[dict]:
             "豆一这段": swings["A"][prev],
             "豆粕这段": swings["M"][prev],
             "菜粕这段": swings["RM"][prev],
-            "新闻倾向": raw_news,
-            "新闻三日": ema,
         }
         named["菜粕价差波段"] = named["菜粕这段"] - named["豆粕这段"]
         for key in ("B", "Y"):
@@ -200,7 +209,7 @@ def build_rows(days: dict[str, dict], overseas: dict, news: dict) -> list[dict]:
         ok = True
         for key in days:
             slot = days[key].get(prev)
-            if slot is None:
+            if slot is None or slot.get("oi_chg") is None or slot.get("vol_chg") is None:
                 ok = False
                 break
             name = train.NAMES[key]
@@ -219,8 +228,14 @@ def build_rows(days: dict[str, dict], overseas: dict, news: dict) -> list[dict]:
             exit_px = days[key][day]["entry"]
             if not entry or not exit_px:
                 continue
-            row["y"][key] = 1 if exit_px > entry else 0
-            row["move"][key] = (exit_px - entry) / entry * 100.0
+            basis = train.roll_basis(key).get(day)
+            if basis and basis.get("昨收") and basis.get("当日收"):
+                move = (basis["当日收"] - basis["昨收"]) / basis["昨收"] * 100.0
+                row["y"][key] = 1 if move > 0 else 0
+                row["move"][key] = move
+            else:
+                row["y"][key] = 1 if exit_px > entry else 0
+                row["move"][key] = (exit_px - entry) / entry * 100.0
             row["entry"][key] = entry
             row["exit"][key] = exit_px
         rows.append(row)
