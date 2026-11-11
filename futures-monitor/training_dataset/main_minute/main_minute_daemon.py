@@ -3,6 +3,8 @@
 
 During a session, each finished minute is written from the live quote.
 After the close, one pass fills empty turnover from the paid minute download.
+Every evening at 20:00, another pass inserts any missing minutes from that
+download for the last week of closed sessions, and fills empty turnover.
 Price, volume, open interest, and bid/ask stay as the live minute wrote them.
 """
 
@@ -16,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from bisect import bisect_right
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -28,6 +31,8 @@ TZ = ZoneInfo("Asia/Shanghai")
 LOG = ROOT / "main-minute-daemon.log"
 PIDFILE = ROOT / "data" / "main_minute_daemon.pid"
 BACKFILL_MARK = ROOT / "data" / "main_minute_backfill.txt"
+HOLEFILL_MARK = ROOT / "data" / "main_minute_holefill.txt"
+HOLEFILL_LOOKBACK_DAYS = 7
 GAP_ONCE = ROOT / "data" / "main_minute_gap_once.txt"
 GAP_START = "2026-10-21 21:00:00"
 GAP_END = "2026-10-22 13:29:00"
@@ -416,6 +421,224 @@ def _backfill_due(now: datetime) -> tuple[str, str, str] | None:
     return None
 
 
+
+def _holefill_marks() -> set[str]:
+    if not HOLEFILL_MARK.exists():
+        return set()
+    return {line.strip() for line in HOLEFILL_MARK.read_text().splitlines() if line.strip()}
+
+
+def _remember_holefill(key: str) -> None:
+    marks = _holefill_marks()
+    marks.add(key)
+    HOLEFILL_MARK.write_text("\n".join(sorted(marks)) + "\n")
+
+
+def _holefill_due(now: datetime) -> bool:
+    """One pass between 20:00 and 21:00, after the day close and before the night open."""
+
+    if not ((20, 0) <= (now.hour, now.minute) < (21, 0)):
+        return False
+    return now.date().isoformat() not in _holefill_marks()
+
+
+def _next_trading_day(days: list[str], stamp_date: str) -> str | None:
+    index = bisect_right(days, stamp_date)
+    if index >= len(days):
+        return None
+    target = days[index]
+    gap = (datetime.fromisoformat(target) - datetime.fromisoformat(stamp_date)).days
+    return target if 0 < gap <= 15 else None
+
+
+def _bar_contract(product: str, stamp: str, cal: dict[str, str], fallback: str) -> str:
+    if len(stamp) < 16:
+        return ""
+    hm, day = stamp[11:16], stamp[:10]
+    if hm >= "21:00":
+        target = _next_trading_day(sorted(cal), day)
+        return (cal.get(target) if target else "") or fallback
+    if "09:00" <= hm <= "15:00":
+        return cal.get(day, "") or fallback
+    return ""
+
+
+def _session_stamps(day: datetime, night: bool, product: str) -> list[str]:
+    if night:
+        if product == "PK" or day.weekday() == 5:
+            return []
+        ranges = ((21, 0, 23, 0),)
+    else:
+        ranges = ((9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0))
+    out = []
+    for start_hour, start_minute, end_hour, end_minute in ranges:
+        current = day.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        end = day.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        while current <= end:
+            out.append(current.strftime("%Y-%m-%d %H:%M:%S"))
+            current += timedelta(minutes=1)
+    return out
+
+
+def _needed_contracts(product: str, start: datetime, end: datetime, cal: dict[str, str], fallback: str) -> set[str]:
+    found: set[str] = set()
+    cursor = start.date()
+    last = end.date()
+    while cursor <= last:
+        text = cursor.isoformat()
+        day_end = datetime(cursor.year, cursor.month, cursor.day, 15, 0, 0)
+        if start <= day_end <= end:
+            if text in cal:
+                found.add(cal[text])
+            elif cursor.weekday() < 5 and cal and text > max(cal) and fallback:
+                # Calendar has not yet recorded this weekday; use the live main.
+                found.add(fallback)
+        night_end = datetime(cursor.year, cursor.month, cursor.day, 23, 0, 0)
+        if product != "PK" and cursor.weekday() != 5 and start <= night_end <= end:
+            code = _bar_contract(product, f"{text} 21:00:00", cal, fallback)
+            if code:
+                found.add(code)
+        cursor += timedelta(days=1)
+    return found
+
+
+def _merge_raw(product: str, contract: str, bars: list[tuple]) -> int:
+    path = pull_main_minutes.RAW / product / f"{contract}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: dict[str, tuple] = {}
+    if path.exists() and path.stat().st_size > 0:
+        with path.open() as handle:
+            handle.readline()
+            for line in handle:
+                if line[:4].isdigit():
+                    parts = line.rstrip("\n").split(",")
+                    rows[parts[0]] = tuple(parts[:8])
+    added = 0
+    for bar in bars:
+        if bar[0] not in rows:
+            rows[bar[0]] = tuple(bar[i] if i < len(bar) else "" for i in range(8))
+            added += 1
+    if added == 0:
+        return 0
+    temporary = path.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(list(pull_main_minutes.FIELDS))
+        for stamp in sorted(rows):
+            writer.writerow(rows[stamp])
+    temporary.replace(path)
+    return added
+
+
+def _evening_holefill(now: datetime) -> None:
+    """Insert missing minutes for closed sessions in the last week, and fill empty amount."""
+
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    end = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    start = (end - timedelta(days=HOLEFILL_LOOKBACK_DAYS)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"晚上8点补缺失分钟 {start_text} → {end_text}", flush=True)
+    token = pull_main_minutes._token()
+    exchanges = dict(pull_main_minutes.PRODUCTS)
+    try:
+        fallbacks = pull_main_minutes.current_mains()
+    except Exception as exc:
+        print(f"晚上8点分主力失败 {exc}，改用文件里最后的合约", flush=True)
+        fallbacks = {}
+    for product in PRODUCTS_ALL:
+        path = MAIN / f"{product}.csv"
+        if not path.exists():
+            continue
+        cal = _calendar(product)
+        fallback = fallbacks.get(product) or _file_contract(product)
+        contracts = _needed_contracts(product, start, end, cal, fallback)
+        if not contracts:
+            print(f"{product} 这段没有可查的合约", flush=True)
+            continue
+        official: dict[str, tuple] = {}
+        fetched_by_code: dict[str, list[tuple]] = {}
+        for contract in sorted(contracts):
+            try:
+                fetched = pull_main_minutes._fetch_contract(
+                    token,
+                    product,
+                    exchanges[product],
+                    contract,
+                    start,
+                )
+            except Exception as exc:
+                print(f"{product} {contract} 下载失败 {exc}", flush=True)
+                continue
+            kept = []
+            for bar in fetched:
+                stamp = bar[0]
+                if not (start_text <= stamp <= end_text):
+                    continue
+                if len(stamp) < 16 or not _keep_clock(product, stamp[11:16]):
+                    continue
+                owner = _bar_contract(product, stamp, cal, fallback)
+                if owner and owner != contract:
+                    continue
+                kept.append(bar)
+                official[stamp] = (bar, contract)
+            fetched_by_code[contract] = kept
+            if not kept:
+                print(f"{product} {contract} 下载接口还没有 {start_text} → {end_text}", flush=True)
+        if not official:
+            print(f"{product} 下载接口还没有可补的分钟", flush=True)
+            continue
+        rows: dict[str, list[str]] = {}
+        with path.open() as handle:
+            handle.readline()
+            for line in handle:
+                if line[:4].isdigit():
+                    parts = _pad(line.rstrip("\n").split(","))
+                    rows[parts[0]] = parts
+        added = 0
+        filled = 0
+        for stamp, (bar, contract) in official.items():
+            current = rows.get(stamp)
+            if current is None:
+                basis = _roll_basis(product, stamp, contract)
+                rows[stamp] = _pad([
+                    stamp, bar[1], bar[2], bar[3], bar[4], bar[5], bar[6], bar[7], contract,
+                    "", "", "", "", "", "", *basis,
+                ])
+                added += 1
+                continue
+            if _blank(current[6]) and bar[6] not in ("", None):
+                current[6] = bar[6]
+                filled += 1
+        raw_added = 0
+        for contract, bars in fetched_by_code.items():
+            raw_added += _merge_raw(product, contract, bars)
+        if added or filled:
+            temporary = path.with_suffix(".csv.tmp")
+            with temporary.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(HEADER)
+                for stamp in sorted(rows):
+                    writer.writerow(rows[stamp])
+            temporary.replace(path)
+        expected_missing = 0
+        cursor = start.date()
+        while cursor <= end.date():
+            day = datetime(cursor.year, cursor.month, cursor.day)
+            for night in (False, True):
+                stamps = [item for item in _session_stamps(day, night, product) if start_text <= item <= end_text]
+                if not stamps or not any(item in official for item in stamps):
+                    continue
+                expected_missing += sum(1 for item in stamps if item not in rows)
+            cursor += timedelta(days=1)
+        extra = f"，接口也缺 {expected_missing} 根" if expected_missing else "，已齐"
+        print(
+            f"{product} 晚上8点补入缺失 {added} 根，成交额 {filled} 处，原始档案 {raw_added} 根{extra}",
+            flush=True,
+        )
+
+
 def _gap_once() -> bool:
     """Insert the one hole left when collection switched to every minute. Bid and ask stay empty."""
 
@@ -565,6 +788,10 @@ def serve() -> None:
                     print(f"补入 {changed} 处", flush=True)
                 else:
                     print("下载接口还没有这批分钟，过十分钟再试一次", flush=True)
+            if _holefill_due(now) and now.minute % 10 == 0 and now.second < 5:
+                print("晚上8点检查缺失分钟", flush=True)
+                _evening_holefill(now)
+                _remember_holefill(now.date().isoformat())
         except Exception as exc:
             print(f"main minute error {exc}", flush=True)
         time.sleep(1)
@@ -587,6 +814,9 @@ def daemonize() -> None:
 
 
 if __name__ == "__main__":
+    if "--holefill-now" in sys.argv:
+        _evening_holefill(datetime.now(TZ))
+        raise SystemExit(0)
     if "--daemon" in sys.argv:
         daemonize()
     serve()

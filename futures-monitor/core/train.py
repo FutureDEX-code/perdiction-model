@@ -8,7 +8,7 @@ logistic model, fit only on whether that contract's next close is up, and
 stored in its own file under data/models/. Changing one file does not rewrite
 the other two. data/model.json is rebuilt from those three files for the board.
 
-No third-party packages. Cached klines live in data/.
+No third-party packages. Daily bars live in training_dataset/; models and runtime state stay under data/.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def series_path(key: str) -> Path:
         return SINA_DAILY / f"{key}.json"
     if key in OVERSEAS or key in OVERSEAS_EXTRA:
         return US_DAILY / f"{key}.json"
-    return DATA / f"{key}.json"
+    raise KeyError(f"没有日线品种 {key}")
 DAILY_EXTRA = ("振幅", "位置", "量变化", "仓变化")
 COT_NAMES = (
     "美豆基金净占比",
