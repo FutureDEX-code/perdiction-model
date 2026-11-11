@@ -23,7 +23,8 @@ PY = "/opt/homebrew/bin/python3"
 TZ = ZoneInfo("Asia/Shanghai")
 LOG = ROOT / "futures-daemon.log"
 PIDFILE = ROOT / "data" / "futures_daemon.pid"
-TRAINED = ROOT / "data" / "last_train_date.txt"
+STATUS = ROOT / "data" / "record_status"
+TRAINED = STATUS / "last_train_date.txt"
 
 
 def _pids(mark: str) -> list[int]:
@@ -51,6 +52,32 @@ def ensure_board() -> None:
     print(f"started board pid {proc.pid}", flush=True)
 
 
+def us_daily_if_due() -> None:
+    """Refresh US daily bars at 14:45 and 20:25, so files are ready before prediction."""
+
+    now = datetime.now(TZ)
+    if now.weekday() >= 5 or (now.hour, now.minute) < (14, 45):
+        return
+    slot = "20:25" if (now.hour, now.minute) >= (20, 25) else "14:45"
+    today = now.date().isoformat()
+    mark = STATUS / "us_daily_fetched.txt"
+    if mark.exists() and mark.read_text().strip() == f"{today} {slot}":
+        return
+    print(f"refreshing us daily {today} {slot}", flush=True)
+    result = subprocess.run(
+        [_venv(), "-u", "-m", "training_dataset.us_daily.fetch_us_daily"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    text = (result.stdout or result.stderr).strip()
+    print(text or f"us daily {result.returncode}", flush=True)
+    if result.returncode == 0:
+        mark.write_text(f"{today} {slot}\n")
+        return
+    print(f"us daily failed {result.returncode}，稍后重试", flush=True)
+
+
 def train_if_due() -> None:
     now = datetime.now(TZ)
     # 下午只补数据并给出方向。20:30 用已有模型再预测，不重训。
@@ -59,7 +86,7 @@ def train_if_due() -> None:
     today = now.date().isoformat()
     if TRAINED.exists() and TRAINED.read_text().strip() == today:
         return
-    stamp = ROOT / "data" / "train_retry_after.txt"
+    stamp = STATUS / "train_retry_after.txt"
     retry_after = None
     if stamp.exists():
         retry_after = datetime.fromisoformat(stamp.read_text().strip())
@@ -90,7 +117,7 @@ def session_tape_if_due() -> None:
     if (now.hour, now.minute) < (15, 1):
         return
     today = now.date().isoformat()
-    mark = ROOT / "data" / "session_tape_day.txt"
+    mark = STATUS / "session_tape_day.txt"
     if mark.exists() and mark.read_text().strip() == today:
         return
     result = subprocess.run([PY, "-m", "jobs.session_tape", today], cwd=ROOT, capture_output=True, text=True)
@@ -131,7 +158,7 @@ def tape_mail_if_due() -> None:
         return
     minute = 0 if now.minute < 30 else 30
     key = f"{now:%Y-%m-%d %H}:{minute:02d}"
-    mark = ROOT / "data" / "tape_emailed_hour.txt"
+    mark = STATUS / "tape_emailed_hour.txt"
     if mark.exists() and mark.read_text().strip() == key:
         return
     result = subprocess.run([PY, "-m", "jobs.mail_tape"], cwd=ROOT, capture_output=True, text=True)
@@ -173,7 +200,7 @@ def evening_if_due() -> None:
     if (now.hour, now.minute) < (20, 30):
         return
     today = now.date().isoformat()
-    mark = ROOT / "data" / "evening_compared.txt"
+    mark = STATUS / "evening_compared.txt"
     if mark.exists() and mark.read_text().strip() == today:
         return
     if not (ROOT / "data" / "compare" / f"{today}_1450.json").exists():
@@ -196,7 +223,7 @@ def halfmonth_if_due() -> None:
     today = now.date().isoformat()
     if now.day not in (1, 16) or (now.hour, now.minute) < (20, 35):
         return
-    mark = ROOT / "data" / "halfmonth_reviewed.txt"
+    mark = STATUS / "halfmonth_reviewed.txt"
     if mark.exists() and mark.read_text().strip() == today:
         return
     result = subprocess.run([_venv(), "-u", "-m", "jobs.review", "--halfmonth"], cwd=ROOT, capture_output=True, text=True)
@@ -213,7 +240,7 @@ def gainmoney_mail_if_due() -> None:
     if (now.hour, now.minute) < (20, 35):
         return
     today = now.date().isoformat()
-    sent = ROOT / "data" / "gainmoney_new_models_emailed.txt"
+    sent = STATUS / "gainmoney_new_models_emailed.txt"
     if sent.exists() and sent.read_text().strip() == today:
         return
     result = subprocess.run([_venv(), "-u", "-m", "gainmoney.mail_new_models"], cwd=ROOT, capture_output=True, text=True)
@@ -227,27 +254,12 @@ def mail_if_due() -> None:
     if (now.hour, now.minute) < (14, 50):
         return
     today = now.date().isoformat()
-    sent = ROOT / "data" / "futures_1450_emailed.txt"
+    sent = STATUS / "futures_1450_emailed.txt"
     if sent.exists() and sent.read_text().strip() == today:
         return
     if not (ROOT / "data" / "compare" / f"{today}_1450.json").exists():
         return
     mail_1450()
-
-
-def ensure_tape() -> None:
-    if _pids("live.tape"):
-        return
-    out = open(ROOT / "tape.log", "a")
-    err = open(ROOT / "tape.err.log", "a")
-    proc = subprocess.Popen(
-        [PY, "-u", "-m", "live.tape"],
-        cwd=ROOT,
-        stdout=out,
-        stderr=err,
-        start_new_session=True,
-    )
-    print(f"started tape pid {proc.pid}", flush=True)
 
 
 def ensure_quotes() -> None:
@@ -271,8 +283,8 @@ def serve() -> None:
     while True:
         try:
             ensure_board()
-            ensure_tape()
             ensure_quotes()
+            us_daily_if_due()
             train_if_due()
             snapshot_if_missing()
             evening_if_due()

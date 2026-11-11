@@ -24,8 +24,10 @@ from jobs.mail_outlook import SENDER, TO, _forbid_company, _google_enabled, _loc
 TZ = ZoneInfo("Asia/Shanghai")
 LOG = ROOT / "sina-daily-daemon.log"
 PIDFILE = ROOT / "data" / "sina_daily_daemon.pid"
-GOT = ROOT / "data" / "sina_daily_fetched.txt"
-MAILED = ROOT / "data" / "sina_daily_fail_mailed.txt"
+STATUS = ROOT / "data" / "record_status"
+GOT = STATUS / "sina_daily_fetched.txt"
+CAL = STATUS / "sina_daily_calendar.txt"
+MAILED = STATUS / "sina_daily_fail_mailed.txt"
 SUBJECT = "新浪日线获取失败"
 
 
@@ -66,6 +68,32 @@ def pull() -> tuple[bool, str, dict]:
     if problems:
         return False, "\n".join(problems), fresh
     return True, "八个品种今天的15:00收盘都到了", fresh
+
+
+def _fresh_from_disk() -> dict:
+    fresh: dict = {}
+    for key, _symbol in (*train.DOMESTIC.items(), *train.SINA_EXTRA.items()):
+        path = train.series_path(key)
+        if path.exists():
+            fresh[key] = json.loads(path.read_text())
+    return fresh
+
+
+def ensure_roll_calendar(fresh: dict | None = None) -> bool:
+    """Append today's roll calendar if the daily files are already in. True when done."""
+
+    today = datetime.now(TZ).date().isoformat()
+    if _marked(CAL, today):
+        return True
+    _update_roll_calendar(fresh if fresh is not None else _fresh_from_disk())
+    from ingest import roll_calendar
+
+    pending = [product for product in roll_calendar.PRODUCTS if today not in roll_calendar.load_calendar(product)]
+    if pending:
+        print(f"换月日历尚未齐 {today} {' '.join(pending)}，稍后重试", flush=True)
+        return False
+    CAL.write_text(today + "\n")
+    return True
 
 
 def _update_roll_calendar(fresh: dict) -> None:
@@ -111,21 +139,25 @@ def serve() -> None:
         try:
             now = datetime.now(TZ)
             today = _today(now)
-            if now.weekday() < 5 and (now.hour, now.minute) >= (18, 0) and not _marked(GOT, today):
-                ok, detail, fresh = pull()
-                if ok:
-                    GOT.write_text(today + "\n")
-                    print(detail, flush=True)
+            if now.weekday() < 5 and (now.hour, now.minute) >= (18, 0):
+                fresh = None
+                if not _marked(GOT, today):
+                    ok, detail, fresh = pull()
+                    if ok:
+                        GOT.write_text(today + "\n")
+                        print(detail, flush=True)
+                    else:
+                        print(detail, flush=True)
+                        if (now.hour, now.minute) >= (18, 20) and not _marked(MAILED, today):
+                            _mail(f"{today} 的新浪日线没有拉下来。\n\n{detail}")
+                            MAILED.write_text(today + "\n")
+                            print("失败信已发出", flush=True)
+                if _marked(GOT, today) and not _marked(CAL, today):
                     try:
-                        _update_roll_calendar(fresh)
+                        if ensure_roll_calendar(fresh):
+                            print("换月日历已续期", flush=True)
                     except Exception as exc:
-                        print(f"换月日历续期失败 {exc}", flush=True)
-                else:
-                    print(detail, flush=True)
-                    if (now.hour, now.minute) >= (18, 20) and not _marked(MAILED, today):
-                        _mail(f"{today} 的新浪日线没有拉下来。\n\n{detail}")
-                        MAILED.write_text(today + "\n")
-                        print("失败信已发出", flush=True)
+                        print(f"换月日历续期失败 {exc}，稍后重试", flush=True)
         except Exception as exc:
             print(f"sina daily error {exc}", flush=True)
         time.sleep(60)

@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 OUTLOOK = ROOT / "data" / "outlook.json"
-SENT = ROOT / "data" / "futures_outlook_emailed.txt"
+STATUS = ROOT / "data" / "record_status"
+SENT = STATUS / "futures_outlook_emailed.txt"
 # Gmail to the same Gmail. The company mailbox is never a sender or a recipient.
 SENDER = "467588110zx@gmail.com"
 TO = SENDER

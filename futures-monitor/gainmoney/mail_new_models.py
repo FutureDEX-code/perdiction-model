@@ -23,7 +23,8 @@ from jobs.mail_outlook import _forbid_company, _google_enabled, _locate, _outbox
 HERE = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Shanghai")
 SUBJECT = "新模型"
-SENT = ROOT / "data" / "gainmoney_new_models_emailed.txt"
+STATUS = ROOT / "data" / "record_status"
+SENT = STATUS / "gainmoney_new_models_emailed.txt"
 ORDER = ["A", "B", "M", "RM", "Y", "P", "OI", "PK"]
 
 

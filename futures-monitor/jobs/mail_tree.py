@@ -32,7 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 OUT = ROOT / "data" / "models_tree"
-SENT = ROOT / "data" / "futures_tree_emailed.txt"
+STATUS = ROOT / "data" / "record_status"
+SENT = STATUS / "futures_tree_emailed.txt"
 VEC = {"A": "x", "M": "x", "RM": "x_rm", "B": "x_b", "Y": "x_y"}
 NAMES = {
     "A": train.FEATURE_NAMES,

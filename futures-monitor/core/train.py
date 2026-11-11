@@ -328,9 +328,10 @@ def _cached_rows(path: Path) -> list[tuple[str, float]]:
 
 
 def load_series() -> dict[str, dict[str, float]]:
-    """Read the five Sina daily files. Fetch only the US bars.
+    """Read the domestic and US daily files. Neither is fetched here.
 
-    sina_daily_daemon.py is the only writer of the domestic daily files.
+    sina_daily_daemon.py writes the domestic files.
+    training_dataset.us_daily.fetch_us_daily writes the US files.
     """
 
     DATA.mkdir(parents=True, exist_ok=True)
@@ -340,32 +341,11 @@ def load_series() -> dict[str, dict[str, float]]:
         if not path.exists():
             raise SystemExit(f"没有新浪日线 {NAMES[key]}")
         series[key] = {day: close for day, close in _cached_rows(path)}
-    for key, symbol in OVERSEAS.items():
+    for key in OVERSEAS:
         path = series_path(key)
-        try:
-            rows = fetch_overseas(symbol)
-            if not rows:
-                raise RuntimeError("空行情")
-        except Exception as exc:
-            if not path.exists():
-                raise
-            print(f"{NAMES.get(key, key)} 行情拉取失败，用缓存 {exc}", flush=True)
-            series[key] = {day: close for day, close in _cached_rows(path)}
-            continue
-        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
-        series[key] = {item["日期"]: float(item["收盘"]) for item in rows}
-    for key, symbol in OVERSEAS_EXTRA.items():
-        path = series_path(key)
-        try:
-            rows = fetch_overseas(symbol)
-            if not rows:
-                raise RuntimeError("空行情")
-        except Exception as exc:
-            if not path.exists():
-                continue
-            print(f"{key} 行情拉取失败，用缓存 {exc}", flush=True)
-            continue
-        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
+        if not path.exists():
+            raise SystemExit(f"没有美盘日线 {key}")
+        series[key] = {day: close for day, close in _cached_rows(path)}
     return series
 
 

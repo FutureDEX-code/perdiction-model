@@ -213,12 +213,17 @@ def _basis(code: str, day: str, product: str | None = None) -> tuple[str, str, s
     dated = sorted(book)
     earlier = [item for item in dated if item < day]
     prev = _numbers(book.get(earlier[-1])) if earlier else None
-    if prev is not None:
-        today = _numbers(book.get(day)) or ("", "", "")
+    today = _numbers(book.get(day))
+    if prev is not None and today is not None:
         return (*prev, *today)
-    if product:
-        return _basis_from_minutes(product, code, day)
-    return None
+    from_minutes = _basis_from_minutes(product, code, day) if product else None
+    if prev is not None:
+        if today is not None:
+            return (*prev, *today)
+        if from_minutes and from_minutes[3]:
+            return (*prev, from_minutes[3], from_minutes[4], from_minutes[5])
+        return (*prev, "", "", "")
+    return from_minutes
 
 
 def for_bar(product: str, trade_time: str, contract: str) -> tuple[str, str, str, str, str, str] | None:

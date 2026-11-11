@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 COMPARE = ROOT / "data" / "compare"
+STATUS = ROOT / "data" / "record_status"
 TZ = ZoneInfo("Asia/Shanghai")
 US_NAMES = (("S", "美豆"), ("SM", "美豆粕"), ("BO", "美豆油"))
 FAMILIES = ("日线回归", "日线树", "分钟回归", "分钟树")
@@ -223,7 +224,7 @@ def _load_days() -> dict[str, dict]:
 
 
 def refresh() -> None:
-    """Bring today's closes, US bars, news, and minute bars in. Do not fit."""
+    """Bring today's closes, news, and minute bars in. US daily is written by the futures daemon. Do not fit."""
 
     series = train.load_series()
     now = datetime.now(TZ)
@@ -495,14 +496,19 @@ def _ensure_sina_daily() -> None:
         ready = train.session_day(cached) == today
     except SystemExit:
         ready = False
+    fresh = None
     if ready:
         print(f"新浪日线已有 {today}", flush=True)
-        return
-    print("新浪日线还没有今天的收盘，调用日线进程去拉", flush=True)
-    ok, detail = sina_daily_daemon.pull()
-    print(detail, flush=True)
-    if not ok:
-        raise SystemExit(detail)
+    else:
+        print("新浪日线还没有今天的收盘，调用日线进程去拉", flush=True)
+        ok, detail, fresh = sina_daily_daemon.pull()
+        print(detail, flush=True)
+        if not ok:
+            raise SystemExit(detail)
+    try:
+        sina_daily_daemon.ensure_roll_calendar(fresh)
+    except Exception as exc:
+        print(f"换月日历续期失败 {exc}", flush=True)
 
 
 def evening() -> None:
@@ -517,7 +523,6 @@ def evening() -> None:
     if out_path.exists():
         payload = json.loads(out_path.read_text())
     else:
-        print("拉取美盘", flush=True)
         series = train.load_series()
         news = {}
         try:
@@ -557,7 +562,7 @@ def mail_1450() -> None:
     if not path.exists():
         snapshot()
     payload = json.loads(path.read_text())
-    sent_path = ROOT / "data" / "futures_1450_emailed.txt"
+    sent_path = STATUS / "futures_1450_emailed.txt"
     if sent_path.exists() and sent_path.read_text().strip() == as_of:
         print(f"already sent {as_of}", flush=True)
         return

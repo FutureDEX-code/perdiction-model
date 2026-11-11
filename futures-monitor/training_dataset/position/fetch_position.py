@@ -11,6 +11,7 @@ A record keeps the top-20 long and short totals with their day changes.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -94,17 +95,51 @@ def _merge(path: Path, rows: list[dict]) -> None:
     path.write_text(json.dumps([kept[d] for d in sorted(kept)], ensure_ascii=False, indent=2))
 
 
+def _recent_days(day: str, count: int = 7) -> list[str]:
+    """The last few trading days up to day, so a missed 20:30 still gets filled."""
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from core import train
+
+    days = [item for item, _close in train._cached_rows(train.series_path("RM")) if item <= day]
+    out = days[-count:]
+    if day not in out:
+        out.append(day)
+    return out
+
+
 def update(day: str | None = None) -> dict[str, dict]:
-    """The 20:30 job calls this. Exchange tables land after the close."""
+    """The 20:30 job calls this. Exchange tables land after the close.
+
+    Also backfills any of the last seven trading days still missing, so a
+    missed evening run does not leave a permanent hole.
+    """
 
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     day = day or datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    got = fetch_day(day)
-    for product, row in got.items():
-        _merge(OUT / f"{product}.json", [row])
-    return got
+    latest: dict[str, dict] = {}
+    for item in _recent_days(day):
+        needed = [product for product in CZCE_PRODUCTS if product != "PK" or item >= "2021-02-01"]
+        if all(item in _have(product) for product in needed):
+            if item == day:
+                for product in needed:
+                    path = OUT / f"{product}.json"
+                    for row in json.loads(path.read_text()):
+                        if row["日期"] == day:
+                            latest[product] = row
+            continue
+        try:
+            got = fetch_day(item)
+        except Exception:
+            continue
+        for product, row in got.items():
+            _merge(OUT / f"{product}.json", [row])
+        if item == day:
+            latest = got
+    return latest
 
 
 def _have(product: str) -> set[str]:

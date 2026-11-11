@@ -30,10 +30,11 @@ from ingest import pull_main_minutes
 TZ = ZoneInfo("Asia/Shanghai")
 LOG = ROOT / "main-minute-daemon.log"
 PIDFILE = ROOT / "data" / "main_minute_daemon.pid"
-BACKFILL_MARK = ROOT / "data" / "main_minute_backfill.txt"
-HOLEFILL_MARK = ROOT / "data" / "main_minute_holefill.txt"
+STATUS = ROOT / "data" / "record_status"
+BACKFILL_MARK = STATUS / "main_minute_backfill.txt"
+HOLEFILL_MARK = STATUS / "main_minute_holefill.txt"
 HOLEFILL_LOOKBACK_DAYS = 7
-GAP_ONCE = ROOT / "data" / "main_minute_gap_once.txt"
+GAP_ONCE = STATUS / "main_minute_gap_once.txt"
 GAP_START = "2026-10-21 21:00:00"
 GAP_END = "2026-10-22 13:29:00"
 MAIN = ROOT / "training_dataset" / "main_minute"
@@ -41,6 +42,8 @@ LIVE = "http://127.0.0.1:8771/latest"
 EXTRAS = ("bid", "ask", "bid_vol", "ask_vol", "pre_close", "pre_settle", "昨收", "昨仓", "昨量", "当日收", "当日仓", "当日量")
 HEADER = ["trade_time", "open", "high", "low", "close", "vol", "amount", "oi", "contract", *EXTRAS]
 SESSIONS = ((9 * 60, 10 * 60 + 15), (10 * 60 + 30, 11 * 60 + 30), (13 * 60 + 30, 15 * 60), (21 * 60, 23 * 60))
+# Six minutes after each session close, so the last minute has time to land.
+POST_FLUSH = ((10, 21), (11, 36), (15, 6), (23, 6))
 def _minutes(now: datetime) -> int:
     return now.hour * 60 + now.minute
 
@@ -435,7 +438,11 @@ def _remember_holefill(key: str) -> None:
 
 
 def _holefill_due(now: datetime) -> bool:
-    """One pass between 20:00 and 21:00, after the day close and before the night open."""
+    """Between 20:00 and 21:00, after the day close and before the night open.
+
+    The serve loop retries every 10 minutes in this window; the day is marked
+    only after the 20:50 pass, so a late Tushare publish still gets another try.
+    """
 
     if not ((20, 0) <= (now.hour, now.minute) < (21, 0)):
         return False
@@ -765,10 +772,10 @@ def serve() -> None:
             if now.second >= 2 and minute != seen_minute and _in_session(previous):
                 seen_minute = minute
                 _append_live(now)
-            # 14:59 and 15:00 finish after the day window closes. Write them
-            # before the 18:00 roll stamp, and drop any quote sitting in between.
+            # Closing minutes finish after each half-open window ends. Write
+            # 10:15, 11:30, 14:59/15:00 and 22:59/23:00 on these marks.
             post = ""
-            if (now.hour, now.minute) in ((15, 6), (23, 6)):
+            if (now.hour, now.minute) in POST_FLUSH:
                 post = minute
             if now.second >= 2 and post and post != flushed:
                 flushed = post
@@ -791,7 +798,9 @@ def serve() -> None:
             if _holefill_due(now) and now.minute % 10 == 0 and now.second < 5:
                 print("晚上8点检查缺失分钟", flush=True)
                 _evening_holefill(now)
-                _remember_holefill(now.date().isoformat())
+                # Retry every 10 minutes until 20:50, then mark this calendar day.
+                if now.minute >= 50:
+                    _remember_holefill(now.date().isoformat())
         except Exception as exc:
             print(f"main minute error {exc}", flush=True)
         time.sleep(1)
