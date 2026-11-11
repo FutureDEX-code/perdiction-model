@@ -70,7 +70,7 @@ def pull() -> tuple[bool, str, dict]:
 
 def _update_roll_calendar(fresh: dict) -> None:
     """Append today to the roll calendar; a confirmed roll for a traded product
-    also reconciles the CTP subscription before the night session."""
+    also reconciles the CTP subscription, stamps the roll session, and syncs rolls.csv."""
 
     from ingest import roll_calendar
     from training_dataset.main_minute.main_minute_daemon import _ensure_subscribed, drop_foreign_day_bars

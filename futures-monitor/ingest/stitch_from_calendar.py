@@ -8,6 +8,9 @@ per-contract archive does not have yet, are kept. The session after the
 calendar's last 15:00 stays a verbatim tail.
 
     python3 ingest/stitch_from_calendar.py [P OI ...]
+
+A partial product list only rewrites those products' rows in rolls.csv.
+Daily confirmed rolls also sync the same file via roll_calendar.sync_rolls.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ PRODUCTS = ("A", "B", "M", "RM", "Y", "P", "OI", "PK")
 # Live tails are preserved for anything the CTP feed writes; the three new
 # products simply have no tail yet until tonight's session starts.
 TRADED = PRODUCTS
-SRC = ROOT / "data" / "tushare_min"
+SRC = ROOT / "data" / "tushare_min_history"
 OUT = ROOT / "training_dataset" / "main_minute"
 HEADER = ["trade_time", "open", "high", "low", "close", "vol", "amount", "oi", "contract", "bid", "ask", "bid_vol", "ask_vol", "pre_close", "pre_settle", "昨收", "昨仓", "昨量", "当日收", "当日仓", "当日量"]
 
@@ -109,10 +112,7 @@ def stitch(product: str) -> None:
         writer.writerows(rows)
         for line in tail:
             handle.write(line + "\n")
-    with (OUT / "rolls.csv").open("a", newline="") as handle:
-        writer = csv.writer(handle)
-        for judged, used_from, old, new in rolls:
-            writer.writerow([product, judged, old, new, used_from])
+    roll_calendar.sync_rolls(product)
     print(f"{product}: {len(rows)} 行 + 尾盘 {len(tail)} 行，换月 {len(rolls)} 次，{trading[0]} -> {last_day}", flush=True)
     from ingest.roll_reference import apply
 
@@ -121,7 +121,6 @@ def stitch(product: str) -> None:
 
 if __name__ == "__main__":
     only = sys.argv[1:]
-    (OUT / "rolls.csv").write_text("product,judged_on,old,new,used_from\n")
     for product in PRODUCTS:
         if only and product not in only:
             continue

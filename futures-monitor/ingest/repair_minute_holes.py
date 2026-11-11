@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Patch the day sessions the 10-day chunking dropped from the per-contract files.
 
-For every data/tushare_min/<PRODUCT>/<CONTRACT>.csv, walk the trading calendar
+For every data/tushare_min_history/<PRODUCT>/<CONTRACT>.csv, walk the trading calendar
 (Sina daily dates) between the file's first and last day. Any trading day with
 zero day-session bars is a hole: refetch that single day from tushare and insert.
 Days the contract genuinely did not trade come back empty and are marked checked
-in data/tushare_min/<PRODUCT>/.repair so reruns skip them.
+in data/tushare_min_history/<PRODUCT>/.repair so reruns skip them.
 
     python3 ingest/repair_minute_holes.py [P OI ...]
 """
@@ -86,21 +86,21 @@ def _merge(path: Path, fresh: list[tuple]) -> None:
 
 
 def _marks(product: str) -> set[str]:
-    path = ROOT / "data" / "tushare_min" / product / ".repair"
+    path = ROOT / "data" / "tushare_min_history" / product / ".repair"
     if not path.exists():
         return set()
     return {line.strip() for line in path.read_text().splitlines() if line.strip()}
 
 
 def _remember(product: str, key: str) -> None:
-    path = ROOT / "data" / "tushare_min" / product / ".repair"
+    path = ROOT / "data" / "tushare_min_history" / product / ".repair"
     marks = _marks(product)
     marks.add(key)
     path.write_text("\n".join(sorted(marks)) + "\n")
 
 
 def repair(product: str, calendar: list[str]) -> None:
-    folder = ROOT / "data" / "tushare_min" / product
+    folder = ROOT / "data" / "tushare_min_history" / product
     if not folder.exists():
         return
     token = pull_main_minutes._token()

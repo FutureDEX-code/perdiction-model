@@ -21,7 +21,7 @@ from ingest import fetch_tushare_min as tushare
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-RAW = ROOT / "data" / "tushare_min"
+RAW = ROOT / "data" / "tushare_min_history"
 MAIN = ROOT / "training_dataset" / "main_minute"
 TOKEN_FILE = ROOT / "data" / "tushare_token"
 PRODUCTS = (

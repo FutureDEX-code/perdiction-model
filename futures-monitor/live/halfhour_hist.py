@@ -21,7 +21,7 @@ from live.hour_model import _solve
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-MIN_DIR = ROOT / "data" / "tushare_min"
+MIN_DIR = ROOT / "data" / "tushare_min_history"
 DAY_SLOTS = (9 * 60, 9 * 60 + 30, 10 * 60 + 30, 11 * 60, 13 * 60 + 30, 14 * 60, 14 * 60 + 30)
 NIGHT_SLOTS = (21 * 60, 21 * 60 + 30, 22 * 60, 22 * 60 + 30)
 # 11:00–11:30 predicts 13:30–14:00. 9:30–10:00 predicts 10:30–11:00.

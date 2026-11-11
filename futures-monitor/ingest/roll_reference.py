@@ -3,16 +3,21 @@
 
 昨收、昨仓、昨量 are the previous day's 15:00 close, open interest, and full-day
 volume. 当日收、当日仓、当日量 are the same three numbers for the roll day itself.
-Both sides are the daily bar, so volume is comparable. The per-contract minute
-archive is not read.
+Both sides are the daily bar, so volume is comparable.
+
+Sina results, including confirmed empty responses, are cached under
+data/sina_contract_daily/. Expired contracts are not fetched again. If Sina
+has no usable previous session, the same six numbers come from that
+contract's minute file.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import time
 from bisect import bisect_right
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core import train
@@ -20,7 +25,8 @@ from ingest import roll_calendar
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "training_dataset" / "main_minute"
-RAW = ROOT / "data" / "tushare_min"
+RAW = ROOT / "data" / "tushare_min_history"
+CACHE = ROOT / "data" / "sina_contract_daily"
 BASIS = ("昨收", "昨仓", "昨量", "当日收", "当日仓", "当日量")
 _SINA: dict[str, dict[str, dict]] = {}
 
@@ -92,18 +98,82 @@ def roll_days(cal: dict[str, str]) -> dict[str, str]:
     return {day: cal[day] for prev, day in zip(days, days[1:]) if cal[prev] != cal[day]}
 
 
-def _sina(code: str) -> dict[str, dict]:
-    if code in _SINA:
-        return _SINA[code]
+def _delivery_end(code: str) -> datetime | None:
+    digits = "".join(ch for ch in code if ch.isdigit())
+    if len(digits) < 4:
+        return None
+    yy, mm = int(digits[-4:-2]), int(digits[-2:])
+    if not 1 <= mm <= 12:
+        return None
+    year = 2000 + yy if yy < 80 else 1900 + yy
+    if mm == 12:
+        return datetime(year + 1, 1, 1)
+    return datetime(year, mm + 1, 1)
+
+
+def _listed(code: str, day: str | None = None) -> bool:
+    end = _delivery_end(code)
+    if end is None:
+        return True
+    now = datetime.fromisoformat(day) if day else datetime.now()
+    return now < end + timedelta(days=30)
+
+
+def _cache_path(code: str) -> Path:
+    return CACHE / f"{code}.json"
+
+
+def _load_cache(code: str) -> dict[str, dict] | None:
+    path = _cache_path(code)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+    except Exception:
+        return None
+    rows = raw.get("rows") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return {str(row["日期"]): row for row in rows if row.get("日期")}
+
+
+def _save_cache(code: str, book: dict[str, dict]) -> None:
+    CACHE.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rows": [book[day] for day in sorted(book)],
+    }
+    _cache_path(code).write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _fetch_sina(code: str) -> dict[str, dict]:
     try:
         rows = train.fetch_domestic(code)
     except Exception as exc:
         print(f"  {code} 新浪日线没有 {exc}", flush=True)
-        book: dict[str, dict] = {}
-    else:
-        book = {str(row["日期"]): row for row in rows}
-        time.sleep(0.12)
+        return {}
+    book = {str(row["日期"]): row for row in rows}
+    if not book:
+        print(f"  {code} 新浪没有日线", flush=True)
+    time.sleep(0.12)
+    return book
+
+
+def _sina(code: str, *, refresh: bool = False) -> dict[str, dict]:
+    if not refresh and code in _SINA:
+        return _SINA[code]
+    previous = _SINA.get(code)
+    if previous is None:
+        previous = _load_cache(code)
+        if previous is not None and not refresh:
+            _SINA[code] = previous
+            return previous
+    book = _fetch_sina(code)
+    if not book and previous:
+        _SINA[code] = previous
+        return previous
     _SINA[code] = book
+    _save_cache(code, book)
     return book
 
 
@@ -116,20 +186,39 @@ def _numbers(row: dict | None) -> tuple[str, str, str] | None:
     return (str(close), str(oi), str(vol))
 
 
-def _basis(code: str, day: str) -> tuple[str, str, str, str, str, str] | None:
+def _basis_from_minutes(product: str, code: str, day: str) -> tuple[str, str, str, str, str, str] | None:
+    cal = roll_calendar.load_calendar(product)
+    sessions = _own_sessions(product, code, sorted(cal), {})
+    prev = _previous(sessions, day)
+    if prev is None:
+        return None
+    today = sessions.get(day) or {}
+    close, oi, vol = today.get("收"), today.get("仓"), today.get("量")
+    return (
+        str(prev["收"]),
+        str(prev["仓"]),
+        str(prev["量"]),
+        "" if close is None else str(close),
+        "" if oi is None else str(oi),
+        "" if not vol else str(vol),
+    )
+
+
+def _basis(code: str, day: str, product: str | None = None) -> tuple[str, str, str, str, str, str] | None:
     """Previous session and the roll day, from that contract's own Sina daily."""
 
     book = _sina(code)
-    if day not in book and code in _SINA:
-        _SINA.pop(code, None)
-        book = _sina(code)
+    if day not in book and _listed(code):
+        book = _sina(code, refresh=True)
     dated = sorted(book)
     earlier = [item for item in dated if item < day]
     prev = _numbers(book.get(earlier[-1])) if earlier else None
-    if prev is None:
-        return None
-    today = _numbers(book.get(day)) or ("", "", "")
-    return (*prev, *today)
+    if prev is not None:
+        today = _numbers(book.get(day)) or ("", "", "")
+        return (*prev, *today)
+    if product:
+        return _basis_from_minutes(product, code, day)
+    return None
 
 
 def for_bar(product: str, trade_time: str, contract: str) -> tuple[str, str, str, str, str, str] | None:
@@ -148,7 +237,7 @@ def for_bar(product: str, trade_time: str, contract: str) -> tuple[str, str, str
     code = roll_days(cal).get(day or "")
     if not day or code != contract:
         return None
-    return _basis(code, day)
+    return _basis(code, day, product)
 
 
 def apply(product: str) -> tuple[int, int]:
@@ -164,7 +253,7 @@ def apply(product: str) -> tuple[int, int]:
         by_code.setdefault(code, []).append(day)
     for code, listed in by_code.items():
         for day in listed:
-            got = _basis(code, day)
+            got = _basis(code, day, product)
             if got is None:
                 missing += 1
                 continue
@@ -225,7 +314,7 @@ def fill_late(product: str) -> int:
                 contract = row.get("contract") or ""
                 if day and code and contract == code:
                     if day not in cached:
-                        cached[day] = _basis(code, day)
+                        cached[day] = _basis(code, day, product)
                     got = cached[day]
                     if got:
                         (row["昨收"], row["昨仓"], row["昨量"], row["当日收"], row["当日仓"], row["当日量"]) = got

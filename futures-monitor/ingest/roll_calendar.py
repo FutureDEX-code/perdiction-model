@@ -2,7 +2,7 @@
 """The one true roll calendar: which contract the Sina continuous tracked each day.
 
 Derived by matching the Sina continuous daily bar against single-contract daily
-bars. History comes from the local per-contract minute files (data/tushare_min),
+bars. History comes from the local per-contract minute files (data/tushare_min_history),
 the recent tail from Sina's per-contract daily API. One file per product in
 training_dataset/roll_calendar/<KEY>.json: {"2026-10-27": "B2612", ...}.
 
@@ -31,9 +31,9 @@ TRADED = PRODUCTS
 
 
 def _contract_daily_from_minutes(product: str) -> dict[str, dict[str, dict]]:
-    """Aggregate data/tushare_min/<product>/*.csv into per-contract daily bars."""
+    """Aggregate data/tushare_min_history/<product>/*.csv into per-contract daily bars."""
 
-    folder = ROOT / "data" / "tushare_min" / product
+    folder = ROOT / "data" / "tushare_min_history" / product
     out: dict[str, dict[str, dict]] = defaultdict(dict)
     if not folder.exists():
         return out
@@ -129,6 +129,59 @@ def save_calendar(product: str, cal: dict[str, str]) -> None:
     path.write_text(json.dumps(dict(sorted(cal.items())), ensure_ascii=False, indent=2))
 
 
+ROLLS = ROOT / "training_dataset" / "main_minute" / "rolls.csv"
+
+
+def rolls_from_calendar(cal: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    """Each roll as (judged_on, used_from, old, new)."""
+
+    days = sorted(cal)
+    return [(prev, day, cal[prev], cal[day]) for prev, day in zip(days, days[1:]) if cal[prev] != cal[day]]
+
+
+def replace_rolls(product: str, rolls: list[tuple[str, str, str, str]]) -> None:
+    """Rewrite this product's rows in rolls.csv, and leave every other product alone."""
+
+    header = ["product", "judged_on", "old", "new", "used_from"]
+    kept: list[list[str] | None] = []
+    placed = False
+    if ROLLS.exists():
+        with ROLLS.open() as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for row in reader:
+                if not row:
+                    continue
+                if row[0] == product:
+                    if not placed:
+                        kept.append(None)
+                        placed = True
+                    continue
+                kept.append(row)
+    if not placed:
+        kept.append(None)
+    written = [[product, judged, old, new, used_from] for judged, used_from, old, new in rolls]
+    temporary = ROLLS.with_suffix(".csv.tmp")
+    ROLLS.parent.mkdir(parents=True, exist_ok=True)
+    with temporary.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for row in kept:
+            if row is None:
+                writer.writerows(written)
+            else:
+                writer.writerow(row)
+    temporary.replace(ROLLS)
+
+
+def sync_rolls(product: str) -> int:
+    """Export this product's calendar rolls into rolls.csv."""
+
+    rolls = rolls_from_calendar(load_calendar(product))
+    replace_rolls(product, rolls)
+    return len(rolls)
+
+
 def backfill(product: str) -> dict[str, str]:
     """Full rebuild of one product's calendar from local minutes plus the Sina tail."""
 
@@ -169,6 +222,7 @@ def backfill(product: str) -> dict[str, str]:
             carried += 1
     cal = dict(sorted(cal.items()))
     save_calendar(product, cal)
+    sync_rolls(product)
     days = sorted(cal)
     rolls = [(day, cal[prev], cal[day]) for prev, day in zip(days, days[1:]) if cal[prev] != cal[day]]
     print(
@@ -221,6 +275,7 @@ def update_today(domestic_rows: dict[str, list[dict]], traded_hook=None) -> list
                     traded_hook(product, old, hit)
         if changed:
             save_calendar(product, cal)
+            sync_rolls(product)
     return rolls
 
 

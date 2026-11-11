@@ -21,10 +21,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-OUT = ROOT / "data" / "tushare_min"
+OUT = ROOT / "data" / "tushare_min_history"
 # Delivery months that can be the main contract while the daily model is in sample.
+# The last month follows today, so a later main such as A2709 stays in the list.
 FIRST = date(2016, 9, 1)
-LAST = date(2027, 5, 1)
+HORIZON_MONTHS = 24
 PRODUCTS = (
     ("A", "DCE"),
     ("B", "DCE"),
@@ -39,22 +40,27 @@ KEEP_FROM = "2016-10-01"
 FIELDS = ("trade_time", "open", "high", "low", "close", "vol", "amount", "oi")
 
 
-def months() -> list[date]:
-    out = []
-    year, month = FIRST.year, FIRST.month
-    while (year, month) <= (LAST.year, LAST.month):
-        out.append(date(year, month, 1))
-        month += 1
-        if month == 13:
-            year, month = year + 1, 1
-    return out
-
-
 def add_months(day: date, count: int) -> date:
     month = day.month - 1 + count
     year = day.year + month // 12
     month = month % 12 + 1
     return date(year, month, 1)
+
+
+def last_month() -> date:
+    return add_months(date.today(), HORIZON_MONTHS)
+
+
+def months() -> list[date]:
+    out = []
+    year, month = FIRST.year, FIRST.month
+    stop = last_month()
+    while (year, month) <= (stop.year, stop.month):
+        out.append(date(year, month, 1))
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return out
 
 
 def code_of(product: str, exchange: str, expiry: date) -> str:
